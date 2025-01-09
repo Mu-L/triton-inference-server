@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2022-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -32,46 +32,7 @@ import os
 import numpy as np
 import tensorrt as trt
 import test_util as tu
-
-
-def np_to_model_dtype(np_dtype):
-    if np_dtype == bool:
-        return "TYPE_BOOL"
-    elif np_dtype == np.int8:
-        return "TYPE_INT8"
-    elif np_dtype == np.int16:
-        return "TYPE_INT16"
-    elif np_dtype == np.int32:
-        return "TYPE_INT32"
-    elif np_dtype == np.int64:
-        return "TYPE_INT64"
-    elif np_dtype == np.uint8:
-        return "TYPE_UINT8"
-    elif np_dtype == np.uint16:
-        return "TYPE_UINT16"
-    elif np_dtype == np.float16:
-        return "TYPE_FP16"
-    elif np_dtype == np.float32:
-        return "TYPE_FP32"
-    elif np_dtype == np.float64:
-        return "TYPE_FP64"
-    elif np_dtype == np_dtype_string:
-        return "TYPE_STRING"
-    return None
-
-
-def np_to_trt_dtype(np_dtype):
-    if np_dtype == bool:
-        return trt.bool
-    elif np_dtype == np.int8:
-        return trt.int8
-    elif np_dtype == np.int32:
-        return trt.int32
-    elif np_dtype == np.float16:
-        return trt.float16
-    elif np_dtype == np.float32:
-        return trt.float32
-    return None
+from gen_common import np_to_model_dtype, np_to_trt_dtype
 
 
 # The 'nonzero' model that we use for data dependent shape is naturally
@@ -86,9 +47,7 @@ def create_data_dependent_modelfile(
     # Create the model
     TRT_LOGGER = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(TRT_LOGGER)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    )
+    network = builder.create_network()
 
     # input
     in0 = network.add_input("INPUT", trt_input_dtype, input_shape)

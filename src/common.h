@@ -1,4 +1,4 @@
-// Copyright 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions
@@ -27,7 +27,11 @@
 
 #include <iostream>
 #include <sstream>
+#include <stdexcept>
 #include <string>
+#include <typeinfo>
+#include <unordered_map>
+#include <variant>
 #include <vector>
 
 #include "triton/core/tritonserver.h"
@@ -63,10 +67,12 @@ const std::vector<std::string> TRITON_RESERVED_REQUEST_PARAMS{
   do {                                                                 \
     TRITONSERVER_Error* err__ = (X);                                   \
     if (err__ != nullptr) {                                            \
-      return TRITONSERVER_ErrorNew(                                    \
+      auto new_err = TRITONSERVER_ErrorNew(                            \
           TRITONSERVER_ErrorCode(err__),                               \
           (std::string(MSG) + ": " + TRITONSERVER_ErrorMessage(err__)) \
               .c_str());                                               \
+      TRITONSERVER_ErrorDelete(err__);                                 \
+      return new_err;                                                  \
     }                                                                  \
   } while (false)
 
@@ -161,11 +167,93 @@ int64_t GetElementCount(const std::vector<int64_t>& dims);
 /// \return True if the str is found, false otherwise.
 bool Contains(const std::vector<std::string>& vec, const std::string& str);
 
-/// Joins vector of strings 'vec' into a single string delimited by 'delim'.
+/// Decodes a Base64 encoded string and stores the result in a vector.
 ///
-/// \param vec The vector of strings to join.
+/// \param input The Base64 encoded input string to decode.
+/// \param input_len The length of the input string.
+/// \param decoded_data A vector to store the decoded data.
+/// \param decoded_size The size of the decoded data.
+/// \param name The name associated with the decoding process.
+/// \return The error status.
+TRITONSERVER_Error* DecodeBase64(
+    const char* input, size_t input_len, std::vector<char>& decoded_data,
+    size_t& decoded_size, const std::string& name);
+
+/// Joins container of strings into a single string delimited by
+/// 'delim'.
+///
+/// \param container The container of strings to join.
 /// \param delim The delimiter to join with.
 /// \return The joint string.
-std::string Join(const std::vector<std::string>& vec, const std::string& delim);
+template <class T>
+std::string
+Join(const T& container, const std::string& delim)
+{
+  if (container.empty()) {
+    return "";
+  }
+  std::stringstream ss;
+  ss << container[0];
+  for (size_t i = 1; i < container.size(); ++i) {
+    ss << delim << container[i];
+  }
+  return ss.str();
+}
+
+
+// Used by Python Bindings to accept arguments to initialize Frontends.
+// Known pybind11 issue: bool has to come before int for std::variant
+using VariantType = std::variant<bool, int, std::string>;
+using UnorderedMapType = std::unordered_map<std::string, VariantType>;
+
+
+template <typename T>
+TRITONSERVER_Error*
+GetValue(const UnorderedMapType& options, const std::string& key, T* arg)
+{
+  auto curr = options.find(key);
+  bool is_present = (curr != options.end());
+  std::string msg;
+
+  if (!is_present) {
+    msg = "Key: " + key + " not found in options provided.";
+    return TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_INVALID_ARG, msg.c_str());
+  }
+
+  bool correct_type = std::holds_alternative<T>(curr->second);
+  if (!correct_type) {
+    std::string expected;
+    std::string found;
+    VariantType value = *arg;
+    if (std::holds_alternative<int>(value)) {
+      expected = "int";
+    } else if (std::holds_alternative<bool>(value)) {
+      expected = "bool";
+    } else if (std::holds_alternative<std::string>(value)) {
+      expected = "string";
+    }
+
+    switch (curr->second.index()) {
+      case 0:
+        found = "bool";
+        break;
+      case 1:
+        found = "int";
+        break;
+      case 2:
+        found = "string";
+        break;
+    }
+
+    msg = "Key: " + key + " found, but incorrect type. Expected " + expected +
+          " Found: " + found;
+
+    return TRITONSERVER_ErrorNew(TRITONSERVER_ERROR_INVALID_ARG, msg.c_str());
+  }
+
+  *arg = std::get<T>(curr->second);
+  return nullptr;
+}
+
 
 }}  // namespace triton::server

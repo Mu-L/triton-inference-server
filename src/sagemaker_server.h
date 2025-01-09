@@ -1,4 +1,4 @@
-// Copyright 2021-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions
@@ -51,8 +51,12 @@ class SagemakerAPIServer : public HTTPAPIServer {
    public:
     explicit SagemakeInferRequestClass(
         TRITONSERVER_Server* server, evhtp_request_t* req,
-        DataCompressor::Type response_compression_type)
-        : InferRequestClass(server, req, response_compression_type)
+        DataCompressor::Type response_compression_type,
+        const std::shared_ptr<TRITONSERVER_InferenceRequest>& triton_request,
+        const std::shared_ptr<SharedMemoryManager>& shm_manager)
+        : InferRequestClass(
+              server, req, response_compression_type, triton_request,
+              shm_manager)
     {
     }
     using InferRequestClass::InferResponseComplete;
@@ -116,15 +120,14 @@ class SagemakerAPIServer : public HTTPAPIServer {
 
   void Handle(evhtp_request_t* req) override;
 
-  /* Method to return 507 on invoke i.e. during SageMakerMMEHandleInfer
-   */
-  static void BADReplyCallback507(evthr_t* thr, void* arg, void* shared);
-
   std::unique_ptr<InferRequestClass> CreateInferRequest(
-      evhtp_request_t* req) override
+      evhtp_request_t* req,
+      const std::shared_ptr<TRITONSERVER_InferenceRequest>& triton_request)
+      override
   {
     return std::unique_ptr<InferRequestClass>(new SagemakeInferRequestClass(
-        server_.get(), req, GetResponseCompressionType(req)));
+        server_.get(), req, GetResponseCompressionType(req), triton_request,
+        shm_manager_));
   }
   TRITONSERVER_Error* GetInferenceHeaderLength(
       evhtp_request_t* req, int32_t content_length,

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2018-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2018-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -36,9 +36,9 @@ import unittest
 import infer_util as iu
 import numpy as np
 import test_util as tu
-import tritongrpcclient as grpcclient
-import tritonhttpclient as httpclient
-from tritonclientutils import *
+import tritonclient.grpc as grpcclient
+import tritonclient.http as httpclient
+from tritonclient.utils import *
 
 
 class ServerMetadataTest(tu.TestResultCollector):
@@ -723,8 +723,8 @@ class ModelMetadataTest(tu.TestResultCollector):
                     stats = infer_stats.model_stats
                 self.assertEqual(
                     len(stats),
-                    219,
-                    "expected 219 infer stats for all ready versions of all model",
+                    221,
+                    "expected 221 infer stats for all ready versions of all model",
                 )
 
         except InferenceServerException as ex:

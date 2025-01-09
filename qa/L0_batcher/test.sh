@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2018-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2018-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -79,12 +79,16 @@ TF_VERSION=${TF_VERSION:=2}
 # On windows the paths invoked by the script (running in WSL) must use
 # /mnt/c when needed but the paths on the tritonserver command-line
 # must be C:/ style.
-if [[ "$(< /proc/sys/kernel/osrelease)" == *microsoft* ]]; then
+if [[ -v WSL_DISTRO_NAME ]] || [[ -v MSYSTEM ]]; then
     MODELDIR=${MODELDIR:=C:/models}
     DATADIR=${DATADIR:="/mnt/c/data/inferenceserver/${REPO_VERSION}"}
     BACKEND_DIR=${BACKEND_DIR:=C:/tritonserver/backends}
     SERVER=${SERVER:=/mnt/c/tritonserver/bin/tritonserver.exe}
     export WSLENV=$WSLENV:TRITONSERVER_DELAY_SCHEDULER
+    TEST_WINDOWS=1
+    # DLIS-7683 This test fails performance-related response time parameters
+    # when using HTTP protocol. Use gRPC protocol for now as a WAR.
+    export USE_GRPC=1
 else
     MODELDIR=${MODELDIR:=`pwd`}
     DATADIR=${DATADIR:="/data/inferenceserver/${REPO_VERSION}"}
@@ -601,7 +605,7 @@ done
 TEST_CASE=test_multi_batch_preserve_ordering
 
 # Skip test for Windows. Trace file concats at 8192 chars on Windows.
-if [[ "$(< /proc/sys/kernel/osrelease)" != *microsoft* ]]; then
+if  [ $TEST_WINDOWS -eq 0 ]; then
     rm -fr ./custom_models && mkdir ./custom_models && \
         cp -r ../custom_models/custom_zero_1_float32 ./custom_models/. && \
         mkdir -p ./custom_models/custom_zero_1_float32/1
@@ -735,6 +739,43 @@ if [[ "$(< /proc/sys/kernel/osrelease)" != *microsoft* ]]; then
     set -e
     unset TRITONSERVER_DELAY_SCHEDULER
 fi
+
+# Test requests should be returned immediately upon timeout, without waiting for
+# the next slot to be available and then returned.
+rm -rf models && mkdir models
+mkdir -p models/dynamic_batch/1 && (cd models/dynamic_batch && \
+    echo 'backend: "identity"' >> config.pbtxt && \
+    echo 'max_batch_size: 1' >> config.pbtxt && \
+    echo -e 'input [{ name: "INPUT0" \n data_type: TYPE_FP32 \n dims: [ -1 ] }]' >> config.pbtxt && \
+    echo -e 'output [{ name: "OUTPUT0" \n data_type: TYPE_FP32 \n dims: [ -1 ] }]' >> config.pbtxt && \
+    echo -e 'instance_group [{ count: 1 \n kind: KIND_CPU }]' >> config.pbtxt && \
+    echo -e 'dynamic_batching {' >> config.pbtxt && \
+    echo -e '  preferred_batch_size: [ 1 ]' >> config.pbtxt && \
+    echo -e '  default_queue_policy { timeout_action: REJECT \n default_timeout_microseconds: 1000000 \n max_queue_size: 8 }' >> config.pbtxt && \
+    echo -e '}' >> config.pbtxt && \
+    echo -e 'parameters [{ key: "execute_delay_ms" \n value: { string_value: "8000" } }]' >> config.pbtxt)
+
+TEST_LOG="queue_timeout_test.log"
+SERVER_LOG="./queue_timeout_test.server.log"
+
+SERVER_ARGS="--model-repository=$MODELDIR/models --log-verbose=2 --backend-directory=${BACKEND_DIR}"
+run_server
+if [ "$SERVER_PID" == "0" ]; then
+    echo -e "\n***\n*** Failed to start $SERVER\n***"
+    cat $SERVER_LOG
+    exit 1
+fi
+
+set +e
+python queue_timeout_test.py > $TEST_LOG 2>&1
+if [ $? -ne 0 ]; then
+    echo -e "\n***\n*** Queue Timeout Tests Failed\n***"
+    cat $TEST_LOG
+    RET=1
+fi
+set -e
+
+kill_server
 
 if [ $RET -eq 0 ]; then
     echo -e "\n***\n*** Test Passed\n***"

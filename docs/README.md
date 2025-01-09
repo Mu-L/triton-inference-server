@@ -1,5 +1,5 @@
 <!--
-# Copyright 2018-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2018-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -69,9 +69,10 @@ The User Guide describes how to configure Triton, organize and configure your mo
 * Collecting Server Metrics [[Overview](README.md#metrics) || [Details](user_guide/metrics.md)]
 * Supporting Custom Ops/layers [[Overview](README.md#framework-custom-operations) || [Details](user_guide/custom_operations.md)]
 * Using the Client API [[Overview](README.md#client-libraries-and-examples) || [Details](https://github.com/triton-inference-server/client)]
+* Cancelling Inference Requests [[Overview](README.md#cancelling-inference-requests) || [Details](user_guide/request_cancellation.md)]
 * Analyzing Performance [[Overview](README.md#performance-analysis)]
 * Deploying on edge (Jetson) [[Overview](README.md#jetson-and-jetpack)]
-
+* Debugging Guide [Details](./user_guide/debugging_guide.md)
 
 ### Model Repository
 [Model Repositories](user_guide/model_repository.md) are the organizational hub for using Triton. All models, configuration files, and additional resources needed to serve the models are housed inside a model repository.
@@ -123,9 +124,9 @@ Triton supports batching individual inference requests to improve compute resour
   - [Queuing Policies](user_guide/model_configuration.md#queue-policy)
   - [Ragged Batching](user_guide/ragged_batching.md)
 - [Sequence Batcher](user_guide/model_configuration.md#sequence-batcher)
-  - [Stateful Models](user_guide/architecture.md#stateful-models)
-  - [Control Inputs](user_guide/architecture.md#control-inputs)
-  - [Implicit State - Stateful Inference Using a Stateless Model](user_guide/architecture.md#implicit-state-management)
+  - [Stateful Models](user_guide/model_execution.md#stateful-models)
+  - [Control Inputs](user_guide/model_execution.md#control-inputs)
+  - [Implicit State - Stateful Inference Using a Stateless Model](user_guide/implicit_state_management.md#implicit-state-management)
   - [Sequence Scheduling Strategies](user_guide/architecture.md#scheduling-strategies)
     - [Direct](user_guide/architecture.md#direct)
     - [Oldest](user_guide/architecture.md#oldest)
@@ -165,12 +166,14 @@ Use the [Triton Client](https://github.com/triton-inference-server/client) API t
   - [Java/Scala](https://github.com/triton-inference-server/client/tree/main/src/grpc_generated/java)
   - [Javascript](https://github.com/triton-inference-server/client/tree/main/src/grpc_generated/javascript)
 - [Shared Memory Extension](protocol/extension_shared_memory.md)
+### Cancelling Inference Requests
+Triton can detect and handle requests that have been cancelled from the client-side. This [document](user_guide/request_cancellation.md) discusses scope and limitations of the feature.
 ### Performance Analysis
 Understanding Inference performance is key to better resource utilization. Use Triton's Tools to costomize your deployment.
 - [Performance Tuning Guide](user_guide/performance_tuning.md)
 - [Optimization](user_guide/optimization.md)
 - [Model Analyzer](user_guide/model_analyzer.md)
-- [Performance Analyzer](https://github.com/triton-inference-server/client/blob/main/src/c++/perf_analyzer/README.md)
+- [Performance Analyzer](https://github.com/triton-inference-server/perf_analyzer/blob/main/README.md)
 - [Inference Request Tracing](user_guide/trace.md)
 ### Jetson and JetPack
 Triton can be deployed on edge devices. Explore [resources](user_guide/jetson.md) and [examples](examples/jetson/README.md).
@@ -182,7 +185,7 @@ The following resources are recommended to explore the full suite of Triton Infe
 
 - **Configuring Deployment**: Triton comes with three tools which can be used to configure deployment setting, measure performance and recommend optimizations.
   - [Model Analyzer](https://github.com/triton-inference-server/model_analyzer) Model Analyzer is CLI tool built to recommend deployment configurations for Triton Inference Server based on user's Quality of Service Requirements. It also generates detailed reports about model performance to summarize the benefits and trade offs of different configurations.
-  - [Perf Analyzer](https://github.com/triton-inference-server/client/blob/main/src/c++/perf_analyzer/README.md):
+  - [Perf Analyzer](https://github.com/triton-inference-server/perf_analyzer/blob/main/README.md):
   Perf Analyzer is a CLI application built to generate inference requests and
   measures the latency of those requests and throughput of the model being
   served.

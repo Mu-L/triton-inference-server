@@ -1,4 +1,4 @@
-// Copyright 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions
@@ -130,8 +130,30 @@ ModelStreamInferHandler::StartNewRequest()
 }
 
 bool
-ModelStreamInferHandler::Process(InferHandler::State* state, bool rpc_ok)
+ModelStreamInferHandler::Process(
+    InferHandler::State* state, bool rpc_ok, bool is_notification)
 {
+  // Because gRPC doesn't allow concurrent writes on the
+  // the stream we only have a single handler thread that
+  // reads from the completion queue. Hence, cancellation
+  // notification will be received on the same handler
+  // thread.
+  // This means that we only need to take care of
+  // synchronizing this thread and the ResponseComplete
+  // threads.
+  if (state->context_->ReceivedNotification()) {
+    std::lock_guard<std::recursive_mutex> lock(state->step_mtx_);
+    if (state->IsGrpcContextCancelled()) {
+      bool resume = state->context_->HandleCancellation(
+          state, rpc_ok, Name(), is_notification);
+      return resume;
+    } else {
+      if (state->context_->HandleCompletion()) {
+        return true;
+      }
+    }
+  }
+
   LOG_VERBOSE(1) << "Process for " << Name() << ", rpc_ok=" << rpc_ok
                  << ", context " << state->context_->unique_id_ << ", "
                  << state->unique_id_ << " step " << state->step_;
@@ -161,7 +183,7 @@ ModelStreamInferHandler::Process(InferHandler::State* state, bool rpc_ok)
     } else {
       // Precondition is not satisfied, cancel the stream
       state->context_->step_ = Steps::COMPLETE;
-      state->step_ = Steps::COMPLETE;
+      state->step_ = Steps::PARTIAL_COMPLETION;
       ::grpc::Status status = ::grpc::Status(
           ::grpc::StatusCode::UNAVAILABLE,
           std::string("This protocol is restricted, expecting header '") +
@@ -169,7 +191,7 @@ ModelStreamInferHandler::Process(InferHandler::State* state, bool rpc_ok)
       state->context_->responder_->Finish(status, state);
       return !finished;
     }
-
+    state->context_->ExtractStateFromHeaders(state);
   } else if (state->step_ == Steps::READ) {
     TRITONSERVER_Error* err = nullptr;
     const inference::ModelInferRequest& request = state->request_;
@@ -184,7 +206,9 @@ ModelStreamInferHandler::Process(InferHandler::State* state, bool rpc_ok)
       state->context_->step_ = Steps::WRITEREADY;
       if (state->context_->IsRequestsCompleted()) {
         state->context_->step_ = Steps::COMPLETE;
-        state->step_ = Steps::COMPLETE;
+        state->step_ = Steps::PARTIAL_COMPLETION;
+        LOG_VERBOSE(2) << "Finishing responder from state "
+                       << state->unique_id_;
         state->context_->responder_->Finish(
             state->context_->finish_ok_ ? ::grpc::Status::OK
                                         : ::grpc::Status::CANCELLED,
@@ -243,6 +267,12 @@ ModelStreamInferHandler::Process(InferHandler::State* state, bool rpc_ok)
     }
 
     if (err == nullptr) {
+      state->inference_request_ = {
+          irequest, [](TRITONSERVER_InferenceRequest* request) {
+            LOG_TRITONSERVER_ERROR(
+                TRITONSERVER_InferenceRequestDelete(request),
+                "deleting gRPC inference request");
+          }};
       err = SetInferenceRequestMetadata(irequest, request, state->parameters_);
     }
 
@@ -254,33 +284,56 @@ ModelStreamInferHandler::Process(InferHandler::State* state, bool rpc_ok)
     // tensors are present in the request.
     std::list<std::string> serialized_data;
 
+    // Maintain shared pointers(read-only reference) to the shared memory
+    // block's information for the shared memory regions used by the request.
+    // These pointers will automatically increase the usage count, preventing
+    // unregistration of the shared memory. This vector must be cleared in the
+    // `StreamInferResponseComplete` callback (after inference) to decrease the
+    // count and permit unregistration. The vector will be included in
+    // `response_release_payload` for the callback.
+    std::vector<std::shared_ptr<const SharedMemoryManager::SharedMemoryInfo>>
+        shm_regions_info;
+
     if (err == nullptr) {
       err = InferGRPCToInput(
-          tritonserver_, shm_manager_, request, &serialized_data, irequest);
+          tritonserver_, shm_manager_, request, &serialized_data, irequest,
+          &shm_regions_info);
     }
     if (err == nullptr) {
       err = InferAllocatorPayload<inference::ModelStreamInferResponse>(
           tritonserver_, shm_manager_, request, std::move(serialized_data),
-          response_queue_, &state->alloc_payload_);
+          response_queue_, &state->alloc_payload_, &shm_regions_info);
     }
+
+    auto request_release_payload =
+        std::make_unique<RequestReleasePayload>(state->inference_request_);
+    auto response_release_payload = std::make_unique<ResponseReleasePayload>(
+        state, std::move(shm_regions_info), shm_manager_);
+
     if (err == nullptr) {
       err = TRITONSERVER_InferenceRequestSetReleaseCallback(
-          irequest, InferRequestComplete, nullptr /* request_release_userp */);
+          irequest, InferRequestComplete,
+          request_release_payload.get() /* request_release_userp */);
     }
     if (err == nullptr) {
       err = TRITONSERVER_InferenceRequestSetResponseCallback(
           irequest, allocator_,
           &state->alloc_payload_ /* response_allocator_userp */,
-          StreamInferResponseComplete, reinterpret_cast<void*>(state));
+          StreamInferResponseComplete,
+          response_release_payload.get() /* response_userp */);
     }
 
     if (err == nullptr) {
       TRITONSERVER_InferenceTrace* triton_trace = nullptr;
 #ifdef TRITON_ENABLE_TRACING
-      state->trace_ =
-          std::move(trace_manager_->SampleTrace(request.model_name()));
-      if (state->trace_ != nullptr) {
-        triton_trace = state->trace_->trace_;
+      if (trace_manager_ != nullptr) {
+        GrpcServerCarrier carrier(state->context_->ctx_.get());
+        auto start_options =
+            trace_manager_->GetTraceStartOptions(carrier, request.model_name());
+        state->trace_ = std::move(trace_manager_->SampleTrace(start_options));
+        if (state->trace_ != nullptr) {
+          triton_trace = state->trace_->trace_;
+        }
       }
 #endif  // TRITON_ENABLE_TRACING
 
@@ -292,9 +345,16 @@ ModelStreamInferHandler::Process(InferHandler::State* state, bool rpc_ok)
     // If there was not an error in issuing the 'state' request then
     // state->step_ == ISSUED and inference request has
     // initiated... the completion callback will transition to
-    // WRITEREADY or WRITTEN. If there was an error then enqueue the
-    // error response and show it to be ready for writing.
-    if (err != nullptr) {
+    // WRITEREADY or WRITTEN or CANCELLED. Recording the state and the
+    // irequest to handle gRPC stream cancellation.
+    if (err == nullptr) {
+      state->context_->InsertInflightState(state);
+      // The payload will be cleaned in release callback.
+      request_release_payload.release();
+      response_release_payload.release();
+    } else {
+      // If there was an error then enqueue the error response and show
+      // it to be ready for writing.
       inference::ModelStreamInferResponse* response;
       if (state->is_decoupled_) {
         state->response_queue_->AllocateResponse();
@@ -311,25 +371,45 @@ ModelStreamInferHandler::Process(InferHandler::State* state, bool rpc_ok)
       LOG_VERBOSE(1) << "[request id: " << log_request_id << "] "
                      << "Infer failed: " << TRITONSERVER_ErrorMessage(err);
 
-      LOG_TRITONSERVER_ERROR(
-          TRITONSERVER_InferenceRequestDelete(irequest),
-          "deleting GRPC inference request");
-
       ::grpc::Status status;
       GrpcStatusUtil::Create(&status, err);
       TRITONSERVER_ErrorDelete(err);
       response->set_error_message(status.error_message());
-
       response->mutable_infer_response()->Clear();
       // repopulate the id so that client knows which request failed.
       response->mutable_infer_response()->set_id(request.id());
-      state->step_ = Steps::WRITEREADY;
       if (!state->is_decoupled_) {
+        state->step_ = Steps::WRITEREADY;
         state->context_->WriteResponseIfReady(state);
       } else {
-        state->response_queue_->MarkNextResponseComplete();
-        state->complete_ = true;
-        state->context_->PutTaskBackToQueue(state);
+        InferHandler::State* writing_state = nullptr;
+        std::lock_guard<std::recursive_mutex> lk1(state->context_->mu_);
+        {
+          std::lock_guard<std::recursive_mutex> lk2(state->step_mtx_);
+          state->response_queue_->MarkNextResponseComplete();
+          state->context_->ready_to_write_states_.push(state);
+          if (!state->context_->ongoing_write_) {
+            // Only one write is allowed per gRPC stream / context at any time.
+            // If the stream is not currently writing, start writing the next
+            // ready to write response from the next ready to write state from
+            // 'ready_to_write_states_'. If there are other responses on the
+            // state ready to be written after starting the write, the state
+            // will be placed at the back of the 'ready_to_write_states_'. If
+            // there are no other response, the state will be marked as 'ISSUED'
+            // if complete final flag is not received yet from the backend or
+            // completed if complete final flag is received.
+            // The 'ongoing_write_' will reset once the completion queue returns
+            // a written state and no additional response on the stream is ready
+            // to be written.
+            state->context_->ongoing_write_ = true;
+            writing_state = state->context_->ready_to_write_states_.front();
+            state->context_->ready_to_write_states_.pop();
+          }
+          state->complete_ = true;
+        }
+        if (writing_state != nullptr) {
+          StateWriteResponse(writing_state);
+        }
       }
     }
 
@@ -350,9 +430,13 @@ ModelStreamInferHandler::Process(InferHandler::State* state, bool rpc_ok)
 
     next_read_state->context_->responder_->Read(
         &next_read_state->request_, next_read_state);
-
+  } else if (state->step_ == Steps::PARTIAL_COMPLETION) {
+    state->step_ = Steps::COMPLETE;
   } else if (state->step_ == Steps::COMPLETE) {
     state->step_ = Steps::FINISH;
+  } else if (state->step_ == Steps::FINISH) {
+    // The RPC execution is finished hence the state
+    // can be released.
     finished = true;
   } else if (!state->is_decoupled_) {
     // We handle the WRITTEN and WRITEREADY states little
@@ -405,17 +489,12 @@ ModelStreamInferHandler::Process(InferHandler::State* state, bool rpc_ok)
       // The counter can be safely decremented.
       state->context_->DecrementRequestCounter();
       finished = Finish(state);
-
-    } else if (state->step_ == Steps::COMPLETE) {
-      state->step_ = Steps::FINISH;
-      finished = true;
     }
   } else {
     //
     //  Decoupled state transitions
     //
     if (state->step_ == Steps::WRITTEN) {
-      state->context_->ongoing_write_ = false;
 #ifdef TRITON_ENABLE_TRACING
       state->trace_timestamps_.emplace_back(
           std::make_pair("GRPC_SEND_END", TraceManager::CaptureTimestamp()));
@@ -433,53 +512,46 @@ ModelStreamInferHandler::Process(InferHandler::State* state, bool rpc_ok)
         state->context_->finish_ok_ = false;
       }
 
-      // Finish the state if all the transactions associated with
-      // the state have completed.
-      if (state->IsComplete()) {
-        state->context_->DecrementRequestCounter();
-        finished = Finish(state);
-      } else {
-        std::lock_guard<std::mutex> lock(state->step_mtx_);
-
-        // If there is an available response to be written
-        // to the stream, then transition directly to WRITEREADY
-        // state and enqueue itself to the completion queue to be
-        // taken up later. Otherwise, go to ISSUED state and wait
-        // for the callback to make a response available.
-        if (state->response_queue_->HasReadyResponse()) {
-          state->step_ = Steps::WRITEREADY;
-          state->context_->PutTaskBackToQueue(state);
-        } else {
-          state->step_ = Steps::ISSUED;
+      {
+        InferHandler::State* writing_state = nullptr;
+        std::lock_guard<std::recursive_mutex> lk1(state->context_->mu_);
+        {
+          std::lock_guard<std::recursive_mutex> lk2(state->step_mtx_);
+          if (!state->context_->ready_to_write_states_.empty()) {
+            writing_state = state->context_->ready_to_write_states_.front();
+            state->context_->ready_to_write_states_.pop();
+          } else {
+            state->context_->ongoing_write_ = false;
+          }
+          // Finish the state if all the transactions associated with
+          // the state have completed.
+          if (state != writing_state) {
+            if (state->IsComplete()) {
+              state->context_->DecrementRequestCounter();
+              finished = Finish(state);
+            } else {
+              state->step_ = Steps::ISSUED;
+            }
+          }
+        }
+        if (writing_state != nullptr) {
+          StateWriteResponse(writing_state);
         }
       }
     } else if (state->step_ == Steps::WRITEREADY) {
-      if (state->delay_response_ms_ != 0) {
-        // Will delay the write of the response by the specified time.
-        // This can be used to test the flow where there are other
-        // responses available to be written.
-        LOG_INFO << "Delaying the write of the response by "
-                 << state->delay_response_ms_ << " ms...";
-        std::this_thread::sleep_for(
-            std::chrono::milliseconds(state->delay_response_ms_));
-      }
-
       // Finish the state if all the transactions associated with
       // the state have completed.
-      if (state->IsComplete()) {
-        state->context_->DecrementRequestCounter();
-        finished = Finish(state);
-      } else {
-        // GRPC doesn't allow to issue another write till
-        // the notification from previous write has been
-        // delivered. If there is an ongoing write then
-        // defer writing and place the task at the back
-        // of the completion queue to be taken up later.
-        if (!state->context_->ongoing_write_) {
-          state->context_->ongoing_write_ = true;
-          state->context_->DecoupledWriteResponse(state);
+      std::lock_guard<std::recursive_mutex> lk1(state->context_->mu_);
+      {
+        if (state->IsComplete()) {
+          state->context_->DecrementRequestCounter();
+          finished = Finish(state);
         } else {
-          state->context_->PutTaskBackToQueue(state);
+          LOG_ERROR << "Should not print this! Decoupled should NOT write via "
+                       "WRITEREADY!";
+          // Remove the state from the completion queue
+          std::lock_guard<std::recursive_mutex> lock(state->step_mtx_);
+          state->step_ = Steps::ISSUED;
         }
       }
     }
@@ -488,19 +560,51 @@ ModelStreamInferHandler::Process(InferHandler::State* state, bool rpc_ok)
   return !finished;
 }
 
+// For decoupled only. Caller must ensure exclusive write.
+void
+ModelStreamInferHandler::StateWriteResponse(InferHandler::State* state)
+{
+  if (state->delay_response_ms_ != 0) {
+    // Will delay the write of the response by the specified time.
+    // This can be used to test the flow where there are other
+    // responses available to be written.
+    LOG_INFO << "Delaying the write of the response by "
+             << state->delay_response_ms_ << " ms...";
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(state->delay_response_ms_));
+  }
+  {
+    std::lock_guard<std::recursive_mutex> lock(state->step_mtx_);
+    state->step_ = Steps::WRITTEN;
+    // gRPC doesn't allow to issue another write till the notification from
+    // previous write has been delivered.
+    state->context_->DecoupledWriteResponse(state);
+    if (state->response_queue_->HasReadyResponse()) {
+      state->context_->ready_to_write_states_.push(state);
+    }
+  }
+}
+
 bool
 ModelStreamInferHandler::Finish(InferHandler::State* state)
 {
   // If done reading and no in-flight requests then can finish the
-  // entire stream. Otherwise just finish this state.
+  // entire stream.
   if (state->context_->IsRequestsCompleted()) {
     state->context_->step_ = Steps::COMPLETE;
-    state->step_ = Steps::COMPLETE;
+    state->step_ = Steps::PARTIAL_COMPLETION;
+    LOG_VERBOSE(2) << "Finishing responder from state " << state->unique_id_;
     state->context_->responder_->Finish(
         state->context_->finish_ok_ ? ::grpc::Status::OK
                                     : ::grpc::Status::CANCELLED,
         state);
+  } else if (state->IsAsyncNotifyState()) {
+    // Should only mark the state complete as the state has been sent
+    // to AsyncNotifyWhenDone() tag and the completion event should take
+    // care of finally releasing the state object.
+    state->step_ = Steps::COMPLETE;
   } else {
+    // Can finish this state.
     state->step_ = Steps::FINISH;
     return true;
   }
@@ -513,15 +617,25 @@ ModelStreamInferHandler::StreamInferResponseComplete(
     TRITONSERVER_InferenceResponse* iresponse, const uint32_t flags,
     void* userp)
 {
-  State* state = reinterpret_cast<State*>(userp);
+  ResponseReleasePayload* response_release_payload(
+      static_cast<ResponseReleasePayload*>(userp));
+  auto state = response_release_payload->state_;
 
+  // Ignore Response from CORE in case GRPC Strict as we dont care about
+  if (state->context_->gRPCErrorTracker_->triton_grpc_error_) {
+    std::lock_guard<std::recursive_mutex> lock(state->context_->mu_);
+    if (state->context_->gRPCErrorTracker_->GRPCErrorEncountered()) {
+      return;
+    }
+  }
   // Increment the callback index
   uint32_t response_index = state->cb_count_++;
 
   LOG_VERBOSE(1) << "ModelStreamInferHandler::StreamInferComplete, context "
                  << state->context_->unique_id_ << ", " << state->unique_id_
                  << " step " << state->step_ << ", callback index "
-                 << state->cb_count_ << ", flags " << flags;
+                 << state->cb_count_ << ", flags " << flags
+                 << ", response is nullptr " << (iresponse == nullptr);
 
 #ifdef TRITON_ENABLE_TRACING
   if (state->cb_count_ == 1) {
@@ -530,17 +644,41 @@ ModelStreamInferHandler::StreamInferResponseComplete(
   }
 #endif  // TRITON_ENABLE_TRACING
 
-  // Log appropriate errors
-  state->complete_ = ((flags & TRITONSERVER_RESPONSE_COMPLETE_FINAL) != 0);
-  if (!state->is_decoupled_) {
-    if (!state->complete_) {
-      LOG_ERROR << "[INTERNAL] ModelStreamInfer received a response without "
-                   "FINAL flag for a model with one-to-one transaction";
+  bool is_complete =
+      state->complete_ || (flags & TRITONSERVER_RESPONSE_COMPLETE_FINAL) != 0;
+
+  // If receiving the final callback then erase the state from the inflight
+  // state data structure to prevent cancellation being called on the request.
+  // Also make sure that if this state was sent to gRPC async notification
+  // mechanism then the state is not removed as it would be needed for handling
+  // the cancellation if detected.
+  if (is_complete && (!state->IsAsyncNotifyState())) {
+    state->context_->EraseInflightState(state);
+  }
+
+  if (state->IsGrpcContextCancelled()) {
+    std::lock_guard<std::recursive_mutex> lock(state->step_mtx_);
+    // Clean-up the received response object.
+    LOG_TRITONSERVER_ERROR(
+        TRITONSERVER_InferenceResponseDelete(iresponse),
+        "deleting GRPC inference response");
+
+    LOG_VERBOSE(1) << "ModelStreamInferHandler::StreamInferResponseComplete, "
+                   << state->unique_id_
+                   << ", skipping response generation as grpc transaction was "
+                      "cancelled... ";
+
+    // If this was the final callback for the state
+    // then cycle through the completion queue so
+    // that state object can be released.
+    if (is_complete) {
+      state->step_ = Steps::CANCELLED;
+      state->context_->PutTaskBackToQueue(state);
+      delete response_release_payload;
     }
-    if (iresponse == nullptr) {
-      LOG_ERROR << "[INTERNAL] ModelStreamInfer received a null response for a "
-                   "model with one-to-one transaction";
-    }
+
+    state->complete_ = is_complete;
+    return;
   }
 
   auto& response_queue = state->response_queue_;
@@ -565,14 +703,28 @@ ModelStreamInferHandler::StreamInferResponseComplete(
     } else {
       LOG_ERROR << "expected the response allocator to have added the response";
     }
-
     if (err != nullptr) {
       failed = true;
       ::grpc::Status status;
+      // Converts CORE errors to GRPC error codes
       GrpcStatusUtil::Create(&status, err);
       response->mutable_infer_response()->Clear();
       response->set_error_message(status.error_message());
       LOG_VERBOSE(1) << "Failed for ID: " << log_request_id << std::endl;
+      if (state->context_->gRPCErrorTracker_->triton_grpc_error_) {
+        state->status_ = status;
+        // Finish only once, if backend ignores cancellation
+        LOG_VERBOSE(1) << "GRPC streaming error detected with status: "
+                       << status.error_code() << "Closing stream connection."
+                       << std::endl;
+        state->context_->WriteGRPCErrorResponse(state);
+        TRITONSERVER_ErrorDelete(err);
+        LOG_TRITONSERVER_ERROR(
+            TRITONSERVER_InferenceResponseDelete(iresponse),
+            "deleting GRPC inference response");
+        delete response_release_payload;
+        return;
+      }
     }
 
     TRITONSERVER_ErrorDelete(err);
@@ -586,8 +738,7 @@ ModelStreamInferHandler::StreamInferResponseComplete(
   // "empty" responses are not sent back to the client. Clients can
   // opt-in to receiving these empty responses via request parameters.
   // NOTE: The complete flag is the only flag used for this case at this time.
-  const bool empty_final =
-      (!iresponse && state->is_decoupled_ && state->complete_);
+  const bool empty_final = !iresponse && state->is_decoupled_ && is_complete;
   const bool enable_empty_final =
       state->parameters_.enable_empty_final_response_;
 
@@ -615,23 +766,129 @@ ModelStreamInferHandler::StreamInferResponseComplete(
       infer_response.set_model_version(state->request_.model_version());
     }
     auto& params = *(infer_response.mutable_parameters());
-    params["triton_final_response"].set_bool_param(state->complete_);
+    params["triton_final_response"].set_bool_param(is_complete);
   }
 
-  // Update states to signal that response/error is ready to write to stream
-  if (state->is_decoupled_) {
-    std::lock_guard<std::mutex> lock(state->step_mtx_);
-    if (response) {
-      state->response_queue_->MarkNextResponseComplete();
+  if (state->delay_complete_ms_ != 0) {
+    // Delay updating the state. This is useful for testing race condition with
+    // the thread that runs Process().
+    LOG_INFO << "Delaying the completion of reporting response / flag by "
+             << state->delay_complete_ms_ << " ms...";
+    void* context_ptr_before_delay = (void*)state->context_.get();
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(state->delay_complete_ms_));
+    void* context_ptr_after_delay = (void*)state->context_.get();
+    if (context_ptr_before_delay != context_ptr_after_delay) {
+      LOG_ERROR << "Should not print this! The state context object has "
+                   "changed after delay, pointer before: "
+                << context_ptr_before_delay
+                << ", pointer after: " << context_ptr_after_delay;
     }
-    if (state->step_ == Steps::ISSUED) {
-      state->step_ = Steps::WRITEREADY;
-      state->context_->PutTaskBackToQueue(state);
-    }
-  } else {
-    state->step_ = Steps::WRITEREADY;
-    state->context_->WriteResponseIfReady(state);
   }
+
+  if (state->IsGrpcContextCancelled()) {
+    // Need to hold lock because the handler thread processing context
+    // cancellation might have cancelled or marked the state for cancellation.
+    std::lock_guard<std::recursive_mutex> lock(state->step_mtx_);
+
+    LOG_VERBOSE(1)
+        << "ModelStreamInferHandler::StreamInferResponseComplete, "
+        << state->unique_id_
+        << ", skipping writing response because of transaction was cancelled";
+
+    // If this was the final callback for the state
+    // then cycle through the completion queue so
+    // that state object can be released.
+    if (is_complete) {
+      state->step_ = Steps::CANCELLED;
+      state->context_->PutTaskBackToQueue(state);
+      delete response_release_payload;
+    }
+
+    state->complete_ = is_complete;
+    return;
+  }
+
+  if (state->is_decoupled_) {
+    InferHandler::State* writing_state = nullptr;
+    std::lock_guard<std::recursive_mutex> lk1(state->context_->mu_);
+    {
+      std::lock_guard<std::recursive_mutex> lk2(state->step_mtx_);
+      bool has_prev_ready_response = state->response_queue_->HasReadyResponse();
+      if (response) {
+        state->response_queue_->MarkNextResponseComplete();
+      }
+      if (!has_prev_ready_response && response) {
+        state->context_->ready_to_write_states_.push(state);
+      }
+      if (!state->context_->ongoing_write_ &&
+          !state->context_->ready_to_write_states_.empty()) {
+        state->context_->ongoing_write_ = true;
+        writing_state = state->context_->ready_to_write_states_.front();
+        state->context_->ready_to_write_states_.pop();
+      }
+      if (is_complete && state->response_queue_->IsEmpty() &&
+          state->step_ == Steps::ISSUED) {
+        // The response queue is empty and complete final flag is received, so
+        // mark the state as 'WRITEREADY' so it can be cleaned up later.
+        state->step_ = Steps::WRITEREADY;
+        state->context_->PutTaskBackToQueue(state);
+      }
+      state->complete_ = is_complete;
+    }
+    if (writing_state != nullptr) {
+      StateWriteResponse(writing_state);
+    }
+  } else {  // non-decoupled
+    std::lock_guard<std::recursive_mutex> lock(state->step_mtx_);
+    state->step_ = Steps::WRITEREADY;
+    if (is_complete) {
+      state->context_->WriteResponseIfReady(state);
+    }
+    state->complete_ = is_complete;
+  }
+
+  if (is_complete) {
+    delete response_release_payload;
+  }
+}
+
+// Changes the state of grpc_stream_error_state_ to ERROR_HANDLING_COMPLETE,
+// indicating we have closed the stream and initiated the cancel flow
+void
+gRPCErrorTracker::MarkGRPCErrorHandlingComplete()
+{
+  grpc_stream_error_state_ = TritonGRPCErrorSteps::ERROR_HANDLING_COMPLETE;
+}
+
+// Returns true ONLY when GRPC_ERROR from CORE is waiting to be processed.
+bool
+gRPCErrorTracker::CheckAndUpdateGRPCError()
+{
+  if (grpc_stream_error_state_ == TritonGRPCErrorSteps::ERROR_ENCOUNTERED) {
+    // Change the state to ERROR_HANDLING_COMPLETE as we have called
+    // HandleCancellation
+    MarkGRPCErrorHandlingComplete();
+    return true;
+  }
+  return false;
+}
+
+// Marks error after it has been responded to
+void
+gRPCErrorTracker::MarkGRPCErrorEncountered()
+{
+  grpc_stream_error_state_ = TritonGRPCErrorSteps::ERROR_ENCOUNTERED;
+}
+
+// Checks if error already responded to in triton_grpc_error mode
+bool
+gRPCErrorTracker::GRPCErrorEncountered()
+{
+  if (grpc_stream_error_state_ == TritonGRPCErrorSteps::NONE) {
+    return false;
+  }
+  return true;
 }
 
 }}}  // namespace triton::server::grpc

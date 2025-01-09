@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2018-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2018-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -257,7 +257,7 @@ function run_server_nowait () {
         return
     fi
 
-    if [[ "$(< /proc/sys/kernel/osrelease)" == *microsoft* ]]; then
+    if [[ -v WSL_DISTRO_NAME ]] || [[ -v MSYSTEM ]]; then
         # LD_PRELOAD not yet supported on windows
         if [ -z "$SERVER_LD_PRELOAD" ]; then
             echo "=== Running $SERVER $SERVER_ARGS"
@@ -329,7 +329,7 @@ function kill_server () {
     # causes the entire WSL shell to just exit. So instead we must use
     # taskkill.exe which can only forcefully kill tritonserver which
     # means that it does not gracefully exit.
-    if [[ "$(< /proc/sys/kernel/osrelease)" == *microsoft* ]]; then
+    if [[ -v WSL_DISTRO_NAME ]]; then
         # Disable -x as it makes output below hard to read
         oldstate="$(set +o)"; [[ -o errexit ]] && oldstate="$oldstate; set -e"
         set +x
@@ -353,6 +353,8 @@ function kill_server () {
         fi
 
         set +vx; eval "$oldstate"
+    elif [[ -v MSYSTEM ]] ; then
+        taskkill //F //IM tritonserver.exe
     else
         # Non-windows...
         kill $SERVER_PID
@@ -468,8 +470,67 @@ function kill_servers () {
     done
 }
 
-# Collect all logs and core dumps and copy them to an upper-level directory for
-# proper capture on the CI.
-function collect_artifacts_from_subdir () {
-    cp *.*log* core* ../ || true
+# Upload a local directory to a GCS path
+function gcs_upload () {
+    local local_path=$1
+    local gcs_path=$2
+    gsutil cp -r $local_path $gcs_path
+}
+
+# Sort an array
+# Call with sort_array <array_name>
+# Example: sort_array array
+sort_array() {
+    local -n arr=$1
+    local length=${#arr[@]}
+
+    if [ "$length" -le 1 ]; then
+        return
+    fi
+
+    IFS=$'\n' sorted_arr=($(sort -n <<<"${arr[*]}"))
+    unset IFS
+    arr=("${sorted_arr[@]}")
+}
+
+# Remove an array's outliers
+# Call with remove_array_outliers <array_name> <percent to trim from both sides>
+# Example: remove_array_outliers array 5
+remove_array_outliers() {
+    local -n arr=$1
+    local percent=$2
+    local length=${#arr[@]}
+
+    if [ "$length" -le 1 ]; then
+        return
+    fi
+
+    local trim_count=$((length * percent / 100))
+    local start_index=$trim_count
+    local end_index=$((length - (trim_count*2)))
+
+    arr=("${arr[@]:$start_index:$end_index}")
+}
+
+function setup_virtualenv() {
+    # Create and activate virtual environment
+    if [[ -v MSYSTEM ]]; then
+      pip3 install pytest
+    else
+      virtualenv --system-site-packages venv
+      source venv/bin/activate
+      pip install pytest
+    fi
+
+    if [[ ${TEST_WINDOWS} == 1 ]]; then
+      pip3 install "numpy<2" tritonclient[all]
+    fi
+}
+
+function deactivate_virtualenv() {
+    # Deactivate virtual environment and clean up
+  if [[ ! -v MSYSTEM ]]; then
+    deactivate
+    rm -fr venv
+  fi
 }

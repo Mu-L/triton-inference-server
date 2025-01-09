@@ -1,4 +1,4 @@
-# Copyright 2019-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -30,26 +30,6 @@ cmake_minimum_required (VERSION 3.18)
 # Unit tests
 #
 find_package(GTest REQUIRED)
-
-#
-# caffe2plan
-#
-if(${TRITON_ENABLE_TENSORRT})
-  add_executable(caffe2plan caffe2plan.cc)
-  target_include_directories(caffe2plan PRIVATE ${CUDA_INCLUDE_DIRS})
-  target_link_libraries(
-    caffe2plan
-    PRIVATE
-      -lnvinfer
-      -lnvcaffe_parser
-      CUDA::cudart
-  )
-
-  install(
-    TARGETS caffe2plan
-    RUNTIME DESTINATION bin
-  )
-endif() # TRITON_ENABLE_TENSORRT
 
 #
 # Unit test for DataCompressor
@@ -84,6 +64,7 @@ if(${TRITON_ENABLE_HTTP} OR ${TRITON_ENABLE_METRICS} OR
     data_compressor_test
     PRIVATE
       triton-core-serverapi   # from repo-core
+      triton-core-serverstub  # from repo-core
       GTest::gtest
       GTest::gtest_main
       ${LIBEVENT_LIBRARIES}
@@ -100,9 +81,10 @@ add_subdirectory(repoagent/relocation_repoagent repoagent/relocation_repoagent)
 
 add_subdirectory(distributed_addsub distributed_addsub)
 add_subdirectory(dyna_sequence dyna_sequence)
-add_subdirectory(implicit_state implicit_state)
+add_subdirectory(iterative_sequence iterative_sequence)
 add_subdirectory(query_backend query_backend)
 
 if(${TRITON_ENABLE_GPU})
   add_subdirectory(sequence sequence)
+  add_subdirectory(implicit_state implicit_state)
 endif()

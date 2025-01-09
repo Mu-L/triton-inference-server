@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2019-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -32,127 +32,17 @@ from builtins import range
 
 import gen_ensemble_model_utils as emu
 import numpy as np
+from gen_common import (
+    np_to_model_dtype,
+    np_to_onnx_dtype,
+    np_to_tf_dtype,
+    np_to_trt_dtype,
+    openvino_save_model,
+)
 
 FLAGS = None
 np_dtype_string = np.dtype(object)
 from typing import List, Tuple
-
-
-def np_to_model_dtype(np_dtype):
-    if np_dtype == bool:
-        return "TYPE_BOOL"
-    elif np_dtype == np.int8:
-        return "TYPE_INT8"
-    elif np_dtype == np.int16:
-        return "TYPE_INT16"
-    elif np_dtype == np.int32:
-        return "TYPE_INT32"
-    elif np_dtype == np.int64:
-        return "TYPE_INT64"
-    elif np_dtype == np.uint8:
-        return "TYPE_UINT8"
-    elif np_dtype == np.uint16:
-        return "TYPE_UINT16"
-    elif np_dtype == np.float16:
-        return "TYPE_FP16"
-    elif np_dtype == np.float32:
-        return "TYPE_FP32"
-    elif np_dtype == np.float64:
-        return "TYPE_FP64"
-    elif np_dtype == np_dtype_string:
-        return "TYPE_STRING"
-    return None
-
-
-def np_to_tf_dtype(np_dtype):
-    if np_dtype == bool:
-        return tf.bool
-    elif np_dtype == np.int8:
-        return tf.int8
-    elif np_dtype == np.int16:
-        return tf.int16
-    elif np_dtype == np.int32:
-        return tf.int32
-    elif np_dtype == np.int64:
-        return tf.int64
-    elif np_dtype == np.uint8:
-        return tf.uint8
-    elif np_dtype == np.uint16:
-        return tf.uint16
-    elif np_dtype == np.float16:
-        return tf.float16
-    elif np_dtype == np.float32:
-        return tf.float32
-    elif np_dtype == np.float64:
-        return tf.float64
-    elif np_dtype == np_dtype_string:
-        return tf.string
-    return None
-
-
-def np_to_trt_dtype(np_dtype):
-    if np_dtype == bool:
-        return trt.bool
-    elif np_dtype == np.int8:
-        return trt.int8
-    elif np_dtype == np.int32:
-        return trt.int32
-    elif np_dtype == np.float16:
-        return trt.float16
-    elif np_dtype == np.float32:
-        return trt.float32
-    return None
-
-
-def np_to_onnx_dtype(np_dtype):
-    if np_dtype == bool:
-        return onnx.TensorProto.BOOL
-    elif np_dtype == np.int8:
-        return onnx.TensorProto.INT8
-    elif np_dtype == np.int16:
-        return onnx.TensorProto.INT16
-    elif np_dtype == np.int32:
-        return onnx.TensorProto.INT32
-    elif np_dtype == np.int64:
-        return onnx.TensorProto.INT64
-    elif np_dtype == np.uint8:
-        return onnx.TensorProto.UINT8
-    elif np_dtype == np.uint16:
-        return onnx.TensorProto.UINT16
-    elif np_dtype == np.float16:
-        return onnx.TensorProto.FLOAT16
-    elif np_dtype == np.float32:
-        return onnx.TensorProto.FLOAT
-    elif np_dtype == np.float64:
-        return onnx.TensorProto.DOUBLE
-    elif np_dtype == np_dtype_string:
-        return onnx.TensorProto.STRING
-    return None
-
-
-def np_to_torch_dtype(np_dtype):
-    if np_dtype == bool:
-        return torch.bool
-    elif np_dtype == np.int8:
-        return torch.int8
-    elif np_dtype == np.int16:
-        return torch.int16
-    elif np_dtype == np.int32:
-        return torch.int
-    elif np_dtype == np.int64:
-        return torch.long
-    elif np_dtype == np.uint8:
-        return torch.uint8
-    elif np_dtype == np.uint16:
-        return None  # Not supported in Torch
-    elif np_dtype == np.float16:
-        return None
-    elif np_dtype == np.float32:
-        return torch.float
-    elif np_dtype == np.float64:
-        return torch.double
-    elif np_dtype == np_dtype_string:
-        return List[str]
 
 
 def create_tf_modelfile(
@@ -685,18 +575,14 @@ def create_openvino_modelfile(
         in_name = "INPUT{}".format(io_num)
         out_name = "OUTPUT{}".format(io_num)
         openvino_inputs.append(
-            ng.parameter(shape=batch_dim + shape, dtype=dtype, name=in_name)
+            ov.opset1.parameter(shape=batch_dim + shape, dtype=dtype, name=in_name)
         )
-        openvino_outputs.append(ng.result(openvino_inputs[io_num], name=out_name))
+        openvino_outputs.append(
+            ov.opset1.result(openvino_inputs[io_num], name=out_name)
+        )
 
-    function = ng.impl.Function(openvino_outputs, openvino_inputs, model_name)
-    ie_network = IENetwork(ng.impl.Function.to_capsule(function))
-
-    os.makedirs(model_version_dir, exist_ok=True)
-
-    ie_network.serialize(
-        model_version_dir + "/model.xml", model_version_dir + "/model.bin"
-    )
+    model = ov.Model(openvino_outputs, openvino_inputs, model_name)
+    openvino_save_model(model_version_dir, model)
 
 
 def create_openvino_modelconfig(
@@ -794,9 +680,8 @@ def create_plan_dynamic_rf_modelfile(
     # Create the model
     TRT_LOGGER = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(TRT_LOGGER)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    )
+    network = builder.create_network()
+
     if max_batch == 0:
         shape_with_batchsize = [i for i in shape]
     else:
@@ -843,7 +728,9 @@ def create_plan_dynamic_rf_modelfile(
     for io_num in range(io_cnt):
         profile.set_shape("INPUT{}".format(io_num), min_shape, opt_shape, max_shape)
 
-    flags = 1 << int(trt.BuilderFlag.STRICT_TYPES)
+    flags = 1 << int(trt.BuilderFlag.DIRECT_IO)
+    flags |= 1 << int(trt.BuilderFlag.PREFER_PRECISION_CONSTRAINTS)
+    flags |= 1 << int(trt.BuilderFlag.REJECT_EMPTY_ALGORITHMS)
     datatype_set = set([trt_dtype])
     for dt in datatype_set:
         if dt == trt.int8:
@@ -872,7 +759,14 @@ def create_plan_dynamic_rf_modelfile(
 
 
 def create_plan_shape_tensor_modelfile(
-    models_dir, model_version, io_cnt, max_batch, dtype, shape, profile_max_size
+    models_dir,
+    model_version,
+    io_cnt,
+    max_batch,
+    dtype,
+    shape,
+    profile_max_size,
+    shape_tensor_input_dtype,
 ):
     # Note that resize layer does not support int tensors.
     # The model takes two inputs (INPUT and DUMMY_INPUT)
@@ -885,9 +779,8 @@ def create_plan_shape_tensor_modelfile(
 
     TRT_LOGGER = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(TRT_LOGGER)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    )
+    network = builder.create_network()
+
     if max_batch == 0:
         shape_with_batchsize = len(shape)
         dummy_shape = [-1] * shape_with_batchsize
@@ -896,10 +789,11 @@ def create_plan_shape_tensor_modelfile(
         dummy_shape = [-1] * shape_with_batchsize
 
     trt_dtype = np_to_trt_dtype(dtype)
+    trt_shape_dtype = np_to_trt_dtype(shape_tensor_input_dtype)
     trt_memory_format = trt.TensorFormat.LINEAR
     for io_num in range(io_cnt):
         in_node = network.add_input(
-            "INPUT{}".format(io_num), trt.int32, [shape_with_batchsize]
+            "INPUT{}".format(io_num), trt_shape_dtype, [shape_with_batchsize]
         )
         in_node.allowed_formats = 1 << int(trt_memory_format)
         dummy_in_node = network.add_input(
@@ -919,7 +813,7 @@ def create_plan_shape_tensor_modelfile(
         network.mark_output(dummy_out_node)
         dummy_out_node.allowed_formats = 1 << int(trt_memory_format)
 
-        out_node.get_output(0).dtype = trt.int32
+        out_node.get_output(0).dtype = trt.int64
         network.mark_output_for_shapes(out_node.get_output(0))
         out_node.get_output(0).allowed_formats = 1 << int(trt_memory_format)
 
@@ -953,7 +847,9 @@ def create_plan_shape_tensor_modelfile(
 
     config.add_optimization_profile(profile)
 
-    flags = 1 << int(trt.BuilderFlag.STRICT_TYPES)
+    flags = 1 << int(trt.BuilderFlag.DIRECT_IO)
+    flags |= 1 << int(trt.BuilderFlag.PREFER_PRECISION_CONSTRAINTS)
+    flags |= 1 << int(trt.BuilderFlag.REJECT_EMPTY_ALGORITHMS)
     datatype_set = set([trt_dtype])
     for dt in datatype_set:
         if dt == trt.int8:
@@ -973,6 +869,7 @@ def create_plan_shape_tensor_modelfile(
     model_name = tu.get_zero_model_name(
         "plan_nobatch" if max_batch == 0 else "plan", io_cnt, dtype
     )
+    model_name = model_name + "_" + np.dtype(shape_tensor_input_dtype).name
     model_version_dir = os.path.join(models_dir, model_name, str(model_version))
     os.makedirs(model_version_dir, exist_ok=True)
 
@@ -986,9 +883,8 @@ def create_plan_dynamic_modelfile(
     # Create the model
     TRT_LOGGER = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(TRT_LOGGER)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    )
+    network = builder.create_network()
+
     if max_batch == 0:
         shape_with_batchsize = [i for i in shape]
     else:
@@ -1027,6 +923,8 @@ def create_plan_dynamic_modelfile(
     config = builder.create_builder_config()
     config.add_optimization_profile(profile)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 20)
+    if FLAGS.tensorrt_compat:
+        config.set_flag(trt.BuilderFlag.VERSION_COMPATIBLE)
     try:
         engine_bytes = builder.build_serialized_network(network, config)
     except AttributeError:
@@ -1034,9 +932,13 @@ def create_plan_dynamic_modelfile(
         engine_bytes = engine.serialize()
         del engine
 
-    model_name = tu.get_zero_model_name(
-        "plan_nobatch" if max_batch == 0 else "plan", io_cnt, dtype
-    )
+    model_name_base = "plan"
+    if max_batch == 0:
+        model_name_base += "_nobatch"
+    if FLAGS.tensorrt_compat:
+        model_name_base += "_compatible"
+
+    model_name = tu.get_zero_model_name(model_name_base, io_cnt, dtype)
     model_version_dir = os.path.join(models_dir, model_name, str(model_version))
     os.makedirs(model_version_dir, exist_ok=True)
 
@@ -1045,16 +947,28 @@ def create_plan_dynamic_modelfile(
 
 
 def create_plan_modelconfig(
-    create_savedmodel, models_dir, model_version, io_cnt, max_batch, dtype, shape
+    create_savedmodel,
+    models_dir,
+    model_version,
+    io_cnt,
+    max_batch,
+    dtype,
+    shape,
+    shape_tensor_input_dtype=None,
 ):
     if not tu.validate_for_trt_model(dtype, dtype, dtype, shape, shape, shape):
         return
 
     shape_str = tu.shape_to_dims_str(shape)
 
-    model_name = tu.get_zero_model_name(
-        "plan_nobatch" if max_batch == 0 else "plan", io_cnt, dtype
-    )
+    model_name_base = "plan"
+    if max_batch == 0:
+        model_name_base += "_nobatch"
+    if FLAGS.tensorrt_compat:
+        model_name_base += "_compatible"
+    model_name = tu.get_zero_model_name(model_name_base, io_cnt, dtype)
+    if shape_tensor_input_dtype:
+        model_name = model_name + "_" + np.dtype(shape_tensor_input_dtype).name
     config_dir = os.path.join(models_dir, model_name)
 
     if FLAGS.tensorrt_shape_io:
@@ -1077,7 +991,7 @@ input [
   }},
   {{
     name: "INPUT{}"
-    data_type: TYPE_INT32
+    data_type: {}
     dims: [ {} ]
     is_shape_tensor: true
   }}
@@ -1090,7 +1004,7 @@ output [
   }},
   {{
     name: "OUTPUT{}"
-    data_type: TYPE_INT32
+    data_type: TYPE_INT64
     dims: [ {} ]
     is_shape_tensor: true
   }}
@@ -1100,6 +1014,7 @@ output [
                 np_to_model_dtype(dtype),
                 shape_str,
                 io_num,
+                np_to_model_dtype(shape_tensor_input_dtype),
                 shape_tensor_dim,
                 io_num,
                 np_to_model_dtype(dtype),
@@ -1148,19 +1063,44 @@ output [
         cfile.write(config)
 
 
-def create_shape_tensor_models(models_dir, dtype, shape, io_cnt=1, no_batch=True):
+def create_shape_tensor_models(
+    models_dir, dtype, shape, shape_tensor_input_dtype, io_cnt=1, no_batch=True
+):
     model_version = 1
 
-    create_plan_modelconfig(True, models_dir, model_version, io_cnt, 8, dtype, shape)
+    create_plan_modelconfig(
+        True,
+        models_dir,
+        model_version,
+        io_cnt,
+        8,
+        dtype,
+        shape,
+        shape_tensor_input_dtype,
+    )
     create_plan_shape_tensor_modelfile(
-        models_dir, model_version, io_cnt, 8, dtype, shape, 32
+        models_dir, model_version, io_cnt, 8, dtype, shape, 32, shape_tensor_input_dtype
     )
     if no_batch:
         create_plan_modelconfig(
-            True, models_dir, model_version, io_cnt, 0, dtype, shape
+            True,
+            models_dir,
+            model_version,
+            io_cnt,
+            0,
+            dtype,
+            shape,
+            shape_tensor_input_dtype,
         )
         create_plan_shape_tensor_modelfile(
-            models_dir, model_version, io_cnt, 0, dtype, shape, 32
+            models_dir,
+            model_version,
+            io_cnt,
+            0,
+            dtype,
+            shape,
+            32,
+            shape_tensor_input_dtype,
         )
 
 
@@ -1228,7 +1168,7 @@ def create_models(models_dir, dtype, shape, io_cnt=1, no_batch=True):
                 True, models_dir, model_version, io_cnt, 0, dtype, shape
             )
 
-    if FLAGS.tensorrt:
+    if FLAGS.tensorrt or FLAGS.tensorrt_compat:
         create_plan_modelconfig(
             True, models_dir, model_version, io_cnt, 8, dtype, shape
         )
@@ -1337,6 +1277,12 @@ if __name__ == "__main__":
         help="Generate TensorRT PLAN models w/ opt profile with large max",
     )
     parser.add_argument(
+        "--tensorrt-compat",
+        required=False,
+        action="store_true",
+        help="Generate TensorRT version-compatible models",
+    )
+    parser.add_argument(
         "--tensorrt-shape-io",
         required=False,
         action="store_true",
@@ -1360,21 +1306,32 @@ if __name__ == "__main__":
     if FLAGS.libtorch:
         import torch
         from torch import nn
-    if FLAGS.tensorrt or FLAGS.tensorrt_big or FLAGS.tensorrt_shape_io:
+    if (
+        FLAGS.tensorrt
+        or FLAGS.tensorrt_big
+        or FLAGS.tensorrt_compat
+        or FLAGS.tensorrt_shape_io
+    ):
         import tensorrt as trt
     if FLAGS.openvino:
-        from openvino.inference_engine import IENetwork
-        import ngraph as ng
+        import openvino.runtime as ov
 
     import test_util as tu
 
     # Create models with variable-sized input and output. For big
-    # TensorRT models only create the one needed for performance
-    # testing
+    # and version-compatible TensorRT models, only create the one
+    # needed for testing.
     if FLAGS.tensorrt_big:
         create_models(FLAGS.models_dir, np.float32, [-1], io_cnt=1)
+    elif FLAGS.tensorrt_compat:
+        create_models(FLAGS.models_dir, np.float32, [-1], io_cnt=1, no_batch=False)
     elif FLAGS.tensorrt_shape_io:
-        create_shape_tensor_models(FLAGS.models_dir, np.float32, [-1, -1], io_cnt=1)
+        create_shape_tensor_models(
+            FLAGS.models_dir, np.float32, [-1, -1], np.int32, io_cnt=1
+        )
+        create_shape_tensor_models(
+            FLAGS.models_dir, np.float32, [-1, -1], np.int64, io_cnt=1
+        )
     else:
         create_models(FLAGS.models_dir, bool, [-1], io_cnt=1)
         create_models(FLAGS.models_dir, np.float32, [-1], io_cnt=1)

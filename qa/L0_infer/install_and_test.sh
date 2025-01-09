@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) 2021, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -25,15 +25,26 @@
 # (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+# Determine the operating system to call the correct package manager.
+ID_LIKE=$(grep -Po '(?<=ID_LIKE=).*' /etc/os-release | awk -F= '{print $1}' |  tr -d '"' | awk '{print $1}')
+
 # Note: This script is to be used with customized triton containers that need
 # dependencies to run L0_infer tests
-apt-get update && \
-    apt-get install -y --no-install-recommends \
-         curl \
-         jq \
-         python3 \
-         python3-pip
-pip3 install --upgrade pip
+if [[ "$ID_LIKE" =~ "debian" ]]; then
+    apt-get update && \
+        apt-get install -y --no-install-recommends \
+            build-essential \
+            curl \
+            jq \
+            libnvrtc12 \
+            python3 \
+            python3-pip
+else
+    yum install -y \
+        jq \
+        curl
+fi
+
 # install client libraries
 pip3 install tritonclient[all]
 

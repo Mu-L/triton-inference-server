@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2021-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -29,8 +29,7 @@ CLIENT_LOG="./env_client.log"
 source ../common.sh
 source ../../common/util.sh
 
-SERVER=/opt/tritonserver/bin/tritonserver
-BASE_SERVER_ARGS="--model-repository=`pwd`/models --log-verbose=1 --disable-auto-complete-config"
+BASE_SERVER_ARGS="--model-repository=${MODELDIR}/env/models --log-verbose=1 --disable-auto-complete-config"
 PYTHON_BACKEND_BRANCH=$PYTHON_BACKEND_REPO_TAG
 SERVER_ARGS=$BASE_SERVER_ARGS
 SERVER_LOG="./env_server.log"
@@ -45,10 +44,11 @@ install_conda
 # Tensorflow 2.1.0 only works with Python 3.4 - 3.7. Successful execution of
 # the Python model indicates that the environment has been setup correctly.
 # Create a model with python 3.7 version
+export PY_VERSION="3.7"
 create_conda_env "3.7" "python-3-7"
 conda install numpy=1.20.1 -y
 conda install tensorflow=2.1.0 -y
-conda install -c conda-forge libstdcxx-ng=12 -y
+conda install -c conda-forge libstdcxx-ng=14 -y
 
 PY37_VERSION_STRING="Python version is 3.7, NumPy version is 1.20.1, and Tensorflow version is 2.1.0"
 create_python_backend_stub
@@ -68,11 +68,12 @@ conda deactivate
 # previous test.
 # Tensorflow 2.1.0 only works with Python 3.4 - 3.7. Successful execution of
 # the Python model indicates that the environment has been setup correctly.
+export PY_VERSION="3.7.1"
 path_to_conda_pack="$PWD/python-3-7-1"
 create_conda_env_with_specified_path "3.7" $path_to_conda_pack
 conda install numpy=1.20.3 -y
 conda install tensorflow=2.1.0 -y
-conda install -c conda-forge libstdcxx-ng=12 -y
+conda install -c conda-forge libstdcxx-ng=14 -y
 
 PY37_1_VERSION_STRING="Python version is 3.7, NumPy version is 1.20.3, and Tensorflow version is 2.1.0"
 create_python_backend_stub
@@ -90,8 +91,9 @@ conda deactivate
 # Create a model with python 3.6 version
 # Tensorflow 2.1.0 only works with Python 3.4 - 3.7. Successful execution of
 # the Python model indicates that the environment has been setup correctly.
+export PY_VERSION="3.6"
 create_conda_env "3.6" "python-3-6"
-conda install -c conda-forge libstdcxx-ng=12 -y
+conda install -c conda-forge libstdcxx-ng=14 -y
 conda install numpy=1.18.1 -y
 conda install tensorflow=2.1.0 -y
 PY36_VERSION_STRING="Python version is 3.6, NumPy version is 1.18.1, and Tensorflow version is 2.1.0"
@@ -111,22 +113,27 @@ cp python_backend/builddir/triton_python_backend_stub ./models/python_3_6
 conda deactivate
 
 # Test conda env without custom Python backend stub This environment should
-# always use the default Python version shipped in the container. For Ubuntu 22.04
-# it is Python 3.10 and for Ubuntu 20.04 is 3.8
-path_to_conda_pack='$$TRITON_MODEL_DIRECTORY/python_3_10_environment.tar.gz'
-create_conda_env "3.10" "python-3-10"
-conda install -c conda-forge libstdcxx-ng=12 -y
-conda install numpy=1.23.4 -y
-conda install tensorflow=2.10.0 -y
-PY310_VERSION_STRING="Python version is 3.10, NumPy version is 1.23.4, and Tensorflow version is 2.10.0"
-conda pack -o python3.10.tar.gz
-mkdir -p models/python_3_10/1/
-cp ../../python_models/python_version/config.pbtxt ./models/python_3_10
-cp python3.10.tar.gz models/python_3_10/python_3_10_environment.tar.gz
-(cd models/python_3_10 && \
-          sed -i "s/^name:.*/name: \"python_3_10\"/" config.pbtxt && \
+# always use the default Python version shipped in the container. For Ubuntu
+# 24.04 it is Python 3.12, for Ubuntu 22.04 is Python 3.10 and for Ubuntu 20.04
+# is 3.8.
+path_to_conda_pack='$$TRITON_MODEL_DIRECTORY/python_3_12_environment.tar.gz'
+create_conda_env "3.12" "python-3-12"
+conda install -c conda-forge libstdcxx-ng=14 -y
+TF_VERSION="2.16.2"
+conda install numpy=1.26.4 -y
+if [ $TRITON_RHEL -eq 1 ]; then
+    TF_VERSION="2.17.0"
+fi
+conda install tensorflow=${TF_VERSION} -y
+PY312_VERSION_STRING="Python version is 3.12, NumPy version is 1.26.4, and Tensorflow version is ${TF_VERSION}"
+conda pack -o python3.12.tar.gz
+mkdir -p models/python_3_12/1/
+cp ../../python_models/python_version/config.pbtxt ./models/python_3_12
+cp python3.12.tar.gz models/python_3_12/python_3_12_environment.tar.gz
+(cd models/python_3_12 && \
+          sed -i "s/^name:.*/name: \"python_3_12\"/" config.pbtxt && \
           echo "parameters: {key: \"EXECUTION_ENV_PATH\", value: {string_value: \"$path_to_conda_pack\"}}" >> config.pbtxt)
-cp ../../python_models/python_version/model.py ./models/python_3_10/1/
+cp ../../python_models/python_version/model.py ./models/python_3_12/1/
 conda deactivate
 rm -rf ./miniconda
 
@@ -137,11 +144,10 @@ if [ "$SERVER_PID" == "0" ]; then
     exit 1
 fi
 
-kill $SERVER_PID
-wait $SERVER_PID
+kill_server
 
 set +e
-for EXPECTED_VERSION_STRING in "$PY36_VERSION_STRING" "$PY37_VERSION_STRING" "$PY37_1_VERSION_STRING" "$PY310_VERSION_STRING"; do
+for EXPECTED_VERSION_STRING in "$PY36_VERSION_STRING" "$PY37_VERSION_STRING" "$PY37_1_VERSION_STRING" "$PY312_VERSION_STRING"; do
     grep "$EXPECTED_VERSION_STRING" $SERVER_LOG
     if [ $? -ne 0 ]; then
         cat $SERVER_LOG
@@ -154,6 +160,15 @@ done
 # NOTE: In certain pybind versions, the locale settings may not be propagated from parent to
 #       stub processes correctly. See https://github.com/triton-inference-server/python_backend/pull/260.
 export LC_ALL=INVALID
+run_server
+if [ "$SERVER_PID" == "0" ]; then
+    echo -e "\n***\n*** Failed to start $SERVER\n***"
+    cat $SERVER_LOG
+    exit 1
+fi
+
+kill_server
+
 grep "Locale is (None, None)" $SERVER_LOG
     if [ $? -ne 0 ]; then
         cat $SERVER_LOG
@@ -175,8 +190,7 @@ if [ "$SERVER_PID" == "0" ]; then
     exit 1
 fi
 
-kill $SERVER_PID
-wait $SERVER_PID
+kill_server
 
 set +e
 grep "Locale is ('en_US', 'UTF-8')" $SERVER_LOG
@@ -199,21 +213,20 @@ if [ "$SERVER_PID" == "0" ]; then
 fi
 
 # The environment should be extracted
-curl -v -X POST localhost:8000/v2/repository/models/python_3_10/load
-touch -m models/python_3_10/1/model.py
+curl -v -X POST localhost:8000/v2/repository/models/python_3_12/load
+touch -m models/python_3_12/1/model.py
 # The environment should not be re-extracted
-curl -v -X POST localhost:8000/v2/repository/models/python_3_10/load
-touch -m models/python_3_10/python_3_10_environment.tar.gz
+curl -v -X POST localhost:8000/v2/repository/models/python_3_12/load
+touch -m models/python_3_12/python_3_12_environment.tar.gz
 # The environment should be re-extracted
-curl -v -X POST localhost:8000/v2/repository/models/python_3_10/load
+curl -v -X POST localhost:8000/v2/repository/models/python_3_12/load
 
-kill $SERVER_PID
-wait $SERVER_PID
+kill_server
 
 set +e
 
-PY310_ENV_EXTRACTION="Extracting Python execution env"
-if [ `grep -c "${PY310_ENV_EXTRACTION}" ${SERVER_LOG}` != "2" ]; then
+PY312_ENV_EXTRACTION="Extracting Python execution env"
+if [ `grep -c "${PY312_ENV_EXTRACTION}" ${SERVER_LOG}` != "2" ]; then
     cat $SERVER_LOG
     echo -e "\n***\n*** Python execution environment should be extracted exactly twice. \n***"
     RET=1
@@ -248,17 +261,19 @@ rm -rf models/python_3_7
 aws s3 cp models/ "${BUCKET_URL_SLASH}" --recursive --include "*"
 
 rm $SERVER_LOG
+# Occasionally needs more time to load
+SERVER_TIMEOUT=420
 
 SERVER_ARGS="--model-repository=$BUCKET_URL_SLASH --log-verbose=1"
 run_server
 if [ "$SERVER_PID" == "0" ]; then
     echo -e "\n***\n*** Failed to start $SERVER\n***"
     cat $SERVER_LOG
+    aws s3 rb "${BUCKET_URL}" --force || true
     exit 1
 fi
 
-kill $SERVER_PID
-wait $SERVER_PID
+kill_server
 
 set +e
 grep "$PY36_VERSION_STRING" $SERVER_LOG
@@ -275,8 +290,8 @@ aws s3 rm "${BUCKET_URL_SLASH}" --recursive --include "*"
 # Test with EXECUTION_ENV_PATH outside the model directory
 sed -i "s/TRITON_MODEL_DIRECTORY\/python_3_6_environment/TRITON_MODEL_DIRECTORY\/..\/python_3_6_environment/" models/python_3_6/config.pbtxt
 mv models/python_3_6/python_3_6_environment.tar.gz models
-sed -i "s/\$\$TRITON_MODEL_DIRECTORY\/python_3_10_environment/s3:\/\/triton-bucket-${CI_JOB_ID}\/python_3_10_environment/" models/python_3_10/config.pbtxt
-mv models/python_3_10/python_3_10_environment.tar.gz models
+sed -i "s/\$\$TRITON_MODEL_DIRECTORY\/python_3_12_environment/s3:\/\/triton-bucket-${CI_JOB_ID}\/python_3_12_environment/" models/python_3_12/config.pbtxt
+mv models/python_3_12/python_3_12_environment.tar.gz models
 
 aws s3 cp models/ "${BUCKET_URL_SLASH}" --recursive --include "*"
 
@@ -287,14 +302,14 @@ run_server
 if [ "$SERVER_PID" == "0" ]; then
     echo -e "\n***\n*** Failed to start $SERVER\n***"
     cat $SERVER_LOG
+    aws s3 rb "${BUCKET_URL}" --force || true
     exit 1
 fi
 
-kill $SERVER_PID
-wait $SERVER_PID
+kill_server
 
 set +e
-for EXPECTED_VERSION_STRING in "$PY36_VERSION_STRING" "$PY310_VERSION_STRING"; do
+for EXPECTED_VERSION_STRING in "$PY36_VERSION_STRING" "$PY312_VERSION_STRING"; do
     grep "$EXPECTED_VERSION_STRING" $SERVER_LOG
     if [ $? -ne 0 ]; then
         cat $SERVER_LOG
@@ -314,7 +329,5 @@ else
   cat $SERVER_LOG
   echo -e "\n***\n*** Env Manager Test FAILED.\n***"
 fi
-
-collect_artifacts_from_subdir
 
 exit $RET

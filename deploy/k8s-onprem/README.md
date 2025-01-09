@@ -1,5 +1,5 @@
 <!--
-# Copyright (c) 2018-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2018-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -234,6 +234,16 @@ EOF
 $ helm install example -f config.yaml .
 ```
 
+## Probe Configuration
+
+In `templates/deployment.yaml` is configurations for `livenessProbe`, `readinessProbe` and `startupProbe` for the Triton server container.
+By default, Triton loads all the models before starting the HTTP server to respond to the probes. The process can take several minutes, depending on the models sizes.
+If it is not completed in `startupProbe.failureThreshold * startupProbe.periodSeconds` seconds then Kubernetes considers this as a pod failure and restarts it,
+ending up with an infinite loop of restarting pods, so make sure to sufficiently set these values for your use case.
+The liveliness and readiness probes are being sent only after the first success of a startup probe.
+
+For more details, see the [Kubernetes probe documentation](https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/) and the [feature page of the startup probe](https://github.com/kubernetes/enhancements/blob/master/keps/sig-node/950-liveness-probe-holdoff/README.md).
+
 ## Using Triton Inference Server
 
 Now that the inference server is running you can send HTTP or GRPC
@@ -285,7 +295,7 @@ Image 'images/mug.jpg':
 After you have confirmed that your Triton cluster is operational and can perform inference,
 you can test the load balancing and autoscaling features by sending a heavy load of requests.
 One option for doing this is using the
-[perf_analyzer](https://github.com/triton-inference-server/client/blob/main/src/c++/perf_analyzer/README.md)
+[perf_analyzer](https://github.com/triton-inference-server/perf_analyzer/blob/main/README.md)
 application.
 
 You can apply a progressively increasing load with a command like:

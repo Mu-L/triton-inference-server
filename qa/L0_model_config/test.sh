@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright (c) 2019-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -39,7 +39,6 @@ if [ ! -z "$TEST_REPO_ARCH" ]; then
 fi
 
 CLIENT_LOG="./client.log"
-CLIENT=model_config_test.py
 
 SERVER=/opt/tritonserver/bin/tritonserver
 SERVER_TIMEOUT=20
@@ -53,11 +52,15 @@ TRIALS="tensorflow_savedmodel tensorflow_graphdef tensorrt_plan onnxruntime_onnx
 # Copy fixed TensorRT plans into the test model repositories.
 for modelpath in \
         autofill_noplatform/tensorrt/bad_input_dims/1 \
+        autofill_noplatform/tensorrt/bad_input_shape/1 \
         autofill_noplatform/tensorrt/bad_input_type/1 \
         autofill_noplatform/tensorrt/bad_input_shape_tensor/1 \
+        autofill_noplatform/tensorrt/bad_input_non_linear_format_io/1 \
         autofill_noplatform/tensorrt/bad_output_dims/1 \
+        autofill_noplatform/tensorrt/bad_output_shape/1 \
         autofill_noplatform/tensorrt/bad_output_type/1 \
         autofill_noplatform/tensorrt/bad_output_shape_tensor/1 \
+        autofill_noplatform/tensorrt/bad_outut_non_linear_format_io/1 \
         autofill_noplatform/tensorrt/too_few_inputs/1 \
         autofill_noplatform/tensorrt/too_many_inputs/1 \
         autofill_noplatform/tensorrt/unknown_input/1 \
@@ -86,7 +89,15 @@ for modelpath in \
         autofill_noplatform/tensorrt/mixed_batch_hint_shape_values/1 \
         autofill_noplatform_success/tensorrt/no_config_shape_tensor/1 ; do
     mkdir -p $modelpath
-    cp /data/inferenceserver/${REPO_VERSION}/qa_shapetensor_model_repository/plan_zero_1_float32/1/model.plan \
+    cp /data/inferenceserver/${REPO_VERSION}/qa_shapetensor_model_repository/plan_zero_1_float32_int32/1/model.plan \
+       $modelpath/.
+done
+
+# Copy TensorRT plans with non-linear format IO into the test model repositories.
+for modelpath in \
+        autofill_noplatform_success/tensorrt/no_config_non_linear_format_io/1 ; do
+    mkdir -p $modelpath
+    cp /data/inferenceserver/${REPO_VERSION}/qa_trt_format_model_repository/plan_CHW32_LINEAR_float32_float32_float32/1/model.plan \
        $modelpath/.
 done
 
@@ -209,17 +220,23 @@ for modelpath in \
         autofill_noplatform_success/python/dynamic_batching_no_op \
         autofill_noplatform_success/python/dynamic_batching \
         autofill_noplatform_success/python/incomplete_input \
+        autofill_noplatform_success/python/model_transaction_policy \
+        autofill_noplatform_success/python/model_transaction_policy_decoupled_false \
+        autofill_noplatform_success/python/model_transaction_policy_no_op \
+        autofill_noplatform_success/python/optional_input \
         autofill_noplatform/python/input_wrong_property \
+        autofill_noplatform/python/model_transaction_policy_invalid_args \
+        autofill_noplatform/python/model_transaction_policy_mismatch \
         autofill_noplatform/python/output_wrong_property ; do
     mkdir -p $modelpath/1
-    mv $modelpath/model.py $modelpath/1/.
+    cp $modelpath/model.py $modelpath/1/.
 done
 for modelpath in \
         autofill_noplatform_success/python/conflicting_scheduler_ensemble/conflicting_scheduler_ensemble \
         autofill_noplatform_success/python/conflicting_scheduler_ensemble/ensemble_first_step \
         autofill_noplatform_success/python/conflicting_scheduler_ensemble/ensemble_second_step ; do
     mkdir -p $modelpath/1
-    mv $modelpath/model.py $modelpath/1/.
+    cp $modelpath/model.py $modelpath/1/.
 done
 
 # Make version folders for custom test model repositories.
@@ -249,6 +266,11 @@ cp -r /data/inferenceserver/${REPO_VERSION}/qa_model_repository/savedmodel_float
 mkdir -p special_cases/noautofill_noconfig/1
 cp -r /data/inferenceserver/${REPO_VERSION}/qa_model_repository/graphdef_float32_float32_float32/1/model.graphdef \
     special_cases/noautofill_noconfig/1/
+# Create runtime escape scenario
+mkdir -p special_cases/runtime_escape/1 special_cases/runtime_escape/dummy_runtime
+touch special_cases/runtime_escape/dummy_runtime/libtriton_identity.so
+# Setup invalid runtime model
+mkdir -p special_cases/invalid_runtime/1
 
 # Copy reshape model files into the test model repositories.
 mkdir -p autofill_noplatform_success/tensorflow_graphdef/reshape_config_provided/1
@@ -287,6 +309,14 @@ cp -r /data/inferenceserver/${REPO_VERSION}/qa_model_repository/openvino_int8_in
     autofill_noplatform_success/openvino/partial_config
 cp /data/inferenceserver/${REPO_VERSION}/qa_model_repository/openvino_int8_int8_int8/output0_labels.txt \
     autofill_noplatform_success/openvino/partial_config
+
+# Copy decoupled model into the model_metrics test repository.
+for modelpath in `ls -d model_metrics/*/*`; do
+    src_dir="/opt/tritonserver/qa/python_models/async_execute_decouple"
+    mkdir -p $modelpath/1
+    cp $src_dir/model.py $modelpath/1/.
+    cat $src_dir/config.pbtxt $modelpath/partial.pbtxt > $modelpath/config.pbtxt
+done
 
 rm -f $SERVER_LOG_BASE* $CLIENT_LOG
 RET=0
@@ -580,7 +610,8 @@ for TARGET_DIR in `ls -d autofill_noplatform_success/*/*`; do
     # that the directory is an entire model repository.
     rm -fr models && mkdir models
     if [ -f ${TARGET_DIR}/config.pbtxt ] || [ "$TARGET" = "no_config" ] \
-            || [ "$TARGET" = "no_config_variable" ] || [ "$TARGET" = "no_config_shape_tensor" ] ; then
+            || [ "$TARGET" = "no_config_variable" ] || [ "$TARGET" = "no_config_shape_tensor" ] \
+            || [ "$TARGET" = "no_config_non_linear_format_io" ] ; then
         cp -r ${TARGET_DIR} models/.
     else
         cp -r ${TARGET_DIR}/* models/.
@@ -603,6 +634,103 @@ for TARGET_DIR in `ls -d autofill_noplatform_success/*/*`; do
 
         kill $SERVER_PID
         wait $SERVER_PID
+    fi
+done
+
+# Run all model_metrics tests that are expected to be successful.
+for TARGET_DIR in `ls -d model_metrics/valid_config/*`; do
+    TARGET_DIR_DOT=`echo $TARGET_DIR | tr / .`
+
+    SERVER_ARGS="--model-repository=`pwd`/models --metrics-config histogram_latencies=true"
+    SERVER_LOG=$SERVER_LOG_BASE.${TARGET_DIR_DOT}.log
+
+    rm -fr models && mkdir models
+    cp -r ${TARGET_DIR} models/.
+
+    echo -e "Test $TARGET_DIR" >> $CLIENT_LOG
+
+    # We expect all tests to succeed
+    run_server
+    if [ "$SERVER_PID" == "0" ]; then
+        echo -e "*** FAILED: unable to start $SERVER" >> $CLIENT_LOG
+        RET=1
+    else
+        kill $SERVER_PID
+        wait $SERVER_PID
+    fi
+done
+
+# Run all model_metrics tests that are expected to be successful but with warnings.
+for TARGET_DIR in `ls -d model_metrics/valid_config_with_warn/*`; do
+    TARGET_DIR_DOT=`echo $TARGET_DIR | tr / .`
+    TARGET=`basename ${TARGET_DIR}`
+
+    SERVER_ARGS="--model-repository=`pwd`/models --metrics-config histogram_latencies=true"
+    SERVER_LOG=$SERVER_LOG_BASE.${TARGET_DIR_DOT}.log
+
+    rm -fr models && mkdir models
+    cp -r ${TARGET_DIR} models/.
+
+    EXPECTED=models/$TARGET/expected
+    echo -e "Test $TARGET_DIR" >> $CLIENT_LOG
+
+    # We expect all tests to succeed with the expected warning message
+    run_server
+    if [ "$SERVER_PID" == "0" ]; then
+        echo -e "*** FAILED: unable to start $SERVER" >> $CLIENT_LOG
+        RET=1
+    else
+        EXFOUND=0
+        EX=`cat $EXPECTED`
+        if grep ^W[0-9][0-9][0-9][0-9].*"$EX" $SERVER_LOG; then
+            echo -e "Found \"$EX\"" >> $CLIENT_LOG
+            EXFOUND=1
+        else
+            echo -e "Not found \"$EX\"" >> $CLIENT_LOG
+        fi
+        if [ "$EXFOUND" == "0" ]; then
+            echo -e "*** FAILED: model_metrics/$TARGET" >> $CLIENT_LOG
+            RET=1
+        fi
+        kill $SERVER_PID
+        wait $SERVER_PID
+    fi
+done
+
+# Run all model_metrics tests that are missing required fields.
+for TARGET_DIR in `ls -d model_metrics/invalid_config/*`; do
+    TARGET_DIR_DOT=`echo $TARGET_DIR | tr / .`
+    TARGET=`basename ${TARGET_DIR}`
+
+    SERVER_ARGS="--model-repository=`pwd`/models --metrics-config histogram_latencies=true"
+    SERVER_LOG=$SERVER_LOG_BASE.${TARGET_DIR_DOT}.log
+
+    rm -fr models && mkdir models
+    cp -r ${TARGET_DIR} models/.
+
+    EXPECTED=models/$TARGET/expected
+    echo -e "Test $TARGET_DIR" >> $CLIENT_LOG
+
+    # We expect all tests to fail with the expected error message
+    run_server
+    if [ "$SERVER_PID" != "0" ]; then
+        echo -e "*** FAILED: unexpected success starting $SERVER" >> $CLIENT_LOG
+        RET=1
+        kill $SERVER_PID
+        wait $SERVER_PID
+    else
+        EXFOUND=0
+        EX=`cat $EXPECTED`
+        if grep ^E[0-9][0-9][0-9][0-9].*"$EX" $SERVER_LOG; then
+            echo -e "Found \"$EX\"" >> $CLIENT_LOG
+            EXFOUND=1
+        else
+            echo -e "Not found \"$EX\"" >> $CLIENT_LOG
+        fi
+        if [ "$EXFOUND" == "0" ]; then
+            echo -e "*** FAILED: model_metrics/$TARGET" >> $CLIENT_LOG
+            RET=1
+        fi
     fi
 done
 

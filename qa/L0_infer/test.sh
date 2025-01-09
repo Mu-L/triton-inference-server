@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2018-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2018-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -37,6 +37,8 @@ fi
 if [ ! -z "$TEST_REPO_ARCH" ]; then
     REPO_VERSION=${REPO_VERSION}_${TEST_REPO_ARCH}
 fi
+
+ldconfig || true
 
 export CUDA_VISIBLE_DEVICES=0
 
@@ -78,14 +80,14 @@ TF_VERSION=${TF_VERSION:=2}
 TEST_JETSON=${TEST_JETSON:=0}
 
 # Default size (in MB) of shared memory to be used by each python model
-# instance (Default is 64MB)
-DEFAULT_SHM_SIZE_MB=${DEFAULT_SHM_SIZE_MB:=64}
+# instance (Default is 1MB)
+DEFAULT_SHM_SIZE_MB=${DEFAULT_SHM_SIZE_MB:=1}
 DEFAULT_SHM_SIZE_BYTES=$((1024*1024*$DEFAULT_SHM_SIZE_MB))
 
 # On windows the paths invoked by the script (running in WSL) must use
 # /mnt/c when needed but the paths on the tritonserver command-line
 # must be C:/ style.
-if [[ "$(< /proc/sys/kernel/osrelease)" == *microsoft* ]]; then
+if [[ -v WSL_DISTRO_NAME ]] || [[ -v MSYSTEM ]]; then
     MODELDIR=${MODELDIR:=C:/models}
     DATADIR=${DATADIR:="/mnt/c/data/inferenceserver/${REPO_VERSION}"}
     BACKEND_DIR=${BACKEND_DIR:=C:/tritonserver/backends}
@@ -141,12 +143,10 @@ BATCH=${BATCH:="1"}
 export BATCH
 
 if [[ $BACKENDS == *"python_dlpack"* ]]; then
-    if [ "$TEST_JETSON" == "0" ]; then
-        if [[ "aarch64" != $(uname -m) ]] ; then
-            pip3 install torch==1.13.0+cpu -f https://download.pytorch.org/whl/torch_stable.html
-        else
-            pip3 install torch==1.13.0 -f https://download.pytorch.org/whl/torch_stable.html
-        fi
+    if [[ "aarch64" != $(uname -m) ]] ; then
+        pip3 install torch==2.3.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
+    else
+        pip3 install torch==2.3.1 -f https://download.pytorch.org/whl/torch_stable.html
     fi
 fi
 
@@ -323,6 +323,7 @@ for TARGET in cpu gpu; do
         check_test_results $TEST_RESULT_FILE $EXPECTED_NUM_TESTS
         if [ $? -ne 0 ]; then
             cat $CLIENT_LOG
+            cat $TEST_RESULT_FILE
             echo -e "\n***\n*** Test Result Verification Failed\n***"
             RET=1
         fi
@@ -350,12 +351,10 @@ done
 if [ "$TEST_VALGRIND" -eq 1 ]; then
   TESTING_BACKENDS="python python_dlpack onnx"
   EXPECTED_NUM_TESTS=42
-  if [ "$TEST_JETSON" == "0" ]; then
-    if [[ "aarch64" != $(uname -m) ]] ; then
-        pip3 install torch==1.13.0+cpu -f https://download.pytorch.org/whl/torch_stable.html
-    else
-        pip3 install torch==1.13.0 -f https://download.pytorch.org/whl/torch_stable.html
-    fi
+  if [[ "aarch64" != $(uname -m) ]] ; then
+      pip3 install torch==2.3.1+cpu -f https://download.pytorch.org/whl/torch_stable.html
+  else
+      pip3 install torch==2.3.1 -f https://download.pytorch.org/whl/torch_stable.html
   fi
 
   for BACKENDS in $TESTING_BACKENDS; do

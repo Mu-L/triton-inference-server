@@ -1,4 +1,4 @@
-# Copyright 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -30,6 +30,9 @@ project(tritonserver LANGUAGES C CXX)
 
 include(CMakeDependentOption)
 
+# Use C++17 standard as Triton's minimum required.
+set(TRITON_MIN_CXX_STANDARD 17 CACHE STRING "The minimum C++ standard which features are requested to build this target.")
+
 set(TRITON_VERSION "0.0.0" CACHE STRING "The version of the Triton shared library" )
 
 option(TRITON_ENABLE_LOGGING "Include logging support in server" ON)
@@ -38,7 +41,8 @@ option(TRITON_ENABLE_TRACING "Include tracing support in server" OFF)
 option(TRITON_ENABLE_NVTX "Include NVTX support in server" OFF)
 option(TRITON_ENABLE_GPU "Enable GPU support in server" ON)
 option(TRITON_ENABLE_MALI_GPU "Enable Arm Mali GPU support in server" OFF)
-set(TRITON_MIN_COMPUTE_CAPABILITY "6.0" CACHE STRING
+option(TRITON_IGPU_BUILD "Enable options for iGPU compilation in sever" OFF)
+set(TRITON_MIN_COMPUTE_CAPABILITY "7.5" CACHE STRING
     "The minimum CUDA compute capability supported by Triton" )
 set(TRITON_EXTRA_LIB_PATHS "" CACHE PATH "Extra library paths for Triton Server build")
 
@@ -68,6 +72,7 @@ option(TRITON_ENABLE_TENSORRT "Include TensorRT backend in server" OFF)
 option(TRITON_ENABLE_ASAN "Build with address sanitizer" OFF)
 
 # Repo tags
+set(TRITON_REPO_ORGANIZATION "https://github.com/triton-inference-server" CACHE STRING "Git repository to pull from")
 set(TRITON_THIRD_PARTY_REPO_TAG "main" CACHE STRING
     "Tag for triton-inference-server/third_party repo")
 set(TRITON_COMMON_REPO_TAG "main" CACHE STRING "Tag for triton-inference-server/common repo")
@@ -109,28 +114,24 @@ include(FetchContent)
 
 FetchContent_Declare(
   repo-core
-  GIT_REPOSITORY https://github.com/triton-inference-server/core.git
+  GIT_REPOSITORY ${TRITON_REPO_ORGANIZATION}/core.git
   GIT_TAG ${TRITON_CORE_REPO_TAG}
 )
 FetchContent_Declare(
   repo-third-party
-  GIT_REPOSITORY https://github.com/triton-inference-server/third_party.git
+  GIT_REPOSITORY ${TRITON_REPO_ORGANIZATION}/third_party.git
   GIT_TAG ${TRITON_THIRD_PARTY_REPO_TAG}
 )
 
 # Some libs are installed to ${TRITON_THIRD_PARTY_INSTALL_PREFIX}/{LIB}/lib64 instead
 # of ${TRITON_THIRD_PARTY_INSTALL_PREFIX}/{LIB}/lib on Centos
-set (LIB_DIR "lib")
-# /etc/os-release does not exist on Windows
-if(EXISTS "/etc/os-release")
-  file(STRINGS /etc/os-release DISTRO REGEX "^NAME=")
-  string(REGEX REPLACE "NAME=\"(.*)\"" "\\1" DISTRO "${DISTRO}")
-  message(STATUS "Distro Name: ${DISTRO}")
-  if(DISTRO MATCHES "CentOS.*")
+set(LIB_DIR "lib")
+if(LINUX)
+  file(STRINGS "/etc/os-release" DISTRO_ID_LIKE REGEX "ID_LIKE")
+  if(${DISTRO_ID_LIKE} MATCHES "rhel|centos")
     set (LIB_DIR "lib64")
-  endif()
-endif()
-
+  endif(${DISTRO_ID_LIKE} MATCHES "rhel|centos")
+endif(LINUX)
 set(TRITON_CORE_HEADERS_ONLY OFF)
 
 FetchContent_MakeAvailable(repo-third-party repo-core)
@@ -188,7 +189,7 @@ else()
   set(TRITON_INSTALL_PREFIX ${CMAKE_INSTALL_PREFIX})
 endif()
 
-set(TRITON_DEPENDS triton-core protobuf googletest)
+set(TRITON_DEPENDS triton-core protobuf googletest re2)
 if(${TRITON_ENABLE_GCS})
   set(TRITON_DEPENDS ${TRITON_DEPENDS} google-cloud-cpp)
 endif() # TRITON_ENABLE_GCS
@@ -217,9 +218,10 @@ ExternalProject_Add(triton-server
     -DGTEST_ROOT:PATH=${TRITON_THIRD_PARTY_INSTALL_PREFIX}/googletest
     -DgRPC_DIR:PATH=${TRITON_THIRD_PARTY_INSTALL_PREFIX}/grpc/lib/cmake/grpc
     -Dc-ares_DIR:PATH=${TRITON_THIRD_PARTY_INSTALL_PREFIX}/c-ares/${LIB_DIR}/cmake/c-ares
+    -Dre2_DIR:PATH=${TRITON_THIRD_PARTY_INSTALL_PREFIX}/re2/${LIB_DIR}/cmake/re2
     -Dabsl_DIR:PATH=${TRITON_THIRD_PARTY_INSTALL_PREFIX}/absl/${LIB_DIR}/cmake/absl
     -DCURL_DIR:STRING=${TRITON_THIRD_PARTY_INSTALL_PREFIX}/curl/${LIB_DIR}/cmake/CURL
-    -Dnlohmann_json_DIR:PATH=${TRITON_THIRD_PARTY_INSTALL_PREFIX}/nlohmann_json/${LIB_DIR}/cmake/nlohmann_json
+    -Dnlohmann_json_DIR:PATH=${TRITON_THIRD_PARTY_INSTALL_PREFIX}/nlohmann_json/share/cmake/nlohmann_json
     -DLibevent_DIR:PATH=${TRITON_THIRD_PARTY_INSTALL_PREFIX}/libevent/lib/cmake/libevent
     -Dlibevhtp_DIR:PATH=${TRITON_THIRD_PARTY_INSTALL_PREFIX}/libevhtp/lib/cmake/libevhtp
     -Dstorage_client_DIR:PATH=${TRITON_THIRD_PARTY_INSTALL_PREFIX}/google-cloud-cpp/${LIB_DIR}/cmake/storage_client
@@ -232,6 +234,8 @@ ExternalProject_Add(triton-server
     -Daws-c-common_DIR:PATH=${TRITON_THIRD_PARTY_INSTALL_PREFIX}/aws-sdk-cpp/${LIB_DIR}/aws-c-common/cmake
     -Daws-checksums_DIR:PATH=${TRITON_THIRD_PARTY_INSTALL_PREFIX}/aws-sdk-cpp/${LIB_DIR}/aws-checksums/cmake
     -Dopentelemetry-cpp_DIR:PATH=${_FINDPACKAGE_OPENTELEMETRY_CONFIG_DIR}
+    -DTRITON_REPO_ORGANIZATION:STRING=${TRITON_REPO_ORGANIZATION}
+    -DTRITON_IGPU_BUILD:BOOL=${TRITON_IGPU_BUILD}
     -DTRITON_THIRD_PARTY_REPO_TAG:STRING=${TRITON_THIRD_PARTY_REPO_TAG}
     -DTRITON_COMMON_REPO_TAG:STRING=${TRITON_COMMON_REPO_TAG}
     -DTRITON_CORE_REPO_TAG:STRING=${TRITON_CORE_REPO_TAG}
@@ -257,6 +261,7 @@ ExternalProject_Add(triton-server
     -DTRITON_ENABLE_S3:BOOL=${TRITON_ENABLE_S3}
     -DTRITON_ENABLE_TENSORRT:BOOL=${TRITON_ENABLE_TENSORRT}
     -DTRITON_ENABLE_ENSEMBLE:BOOL=${TRITON_ENABLE_ENSEMBLE}
+    -DTRITON_MIN_CXX_STANDARD:STRING=${TRITON_MIN_CXX_STANDARD}
     -DCMAKE_BUILD_TYPE:STRING=${CMAKE_BUILD_TYPE}
     -DCMAKE_INSTALL_PREFIX:PATH=${TRITON_INSTALL_PREFIX}
     -DTRITON_VERSION:STRING=${TRITON_VERSION}

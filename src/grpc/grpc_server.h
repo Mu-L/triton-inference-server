@@ -29,6 +29,8 @@
 
 #include <vector>
 
+#include "../common.h"
+#include "../restricted_features.h"
 #include "../shared_memory_manager.h"
 #include "../tracer.h"
 #include "grpc_handler.h"
@@ -65,6 +67,7 @@ struct SslOptions {
 };
 
 // GRPC KeepAlive: https://grpc.github.io/grpc/cpp/md_doc_keepalive.html
+// https://grpc.io/docs/guides/keepalive/
 struct KeepAliveOptions {
   int keepalive_time_ms_{7200000};
   int keepalive_timeout_ms_{20000};
@@ -72,12 +75,8 @@ struct KeepAliveOptions {
   int http2_max_pings_without_data_{2};
   int http2_min_recv_ping_interval_without_data_ms_{300000};
   int http2_max_ping_strikes_{2};
-};
-
-struct ProtocolGroup {
-  std::string name_{""};
-  std::set<std::string> protocols_{};
-  std::pair<std::string, std::string> restricted_key_{"", ""};
+  int max_connection_age_ms_{0};
+  int max_connection_age_grace_ms_{0};
 };
 
 struct Options {
@@ -90,7 +89,7 @@ struct Options {
   // requests doesn't exceed this value there will be no
   // allocation/deallocation of request/response objects.
   int infer_allocation_pool_size_{8};
-  std::vector<ProtocolGroup> protocol_groups_{};
+  RestrictedFeatures restricted_protocols_;
   std::string forward_header_pattern_;
 };
 
@@ -101,6 +100,13 @@ class Server {
       triton::server::TraceManager* trace_manager,
       const std::shared_ptr<SharedMemoryManager>& shm_manager,
       const Options& server_options, std::unique_ptr<Server>* server);
+
+  static TRITONSERVER_Error* Create(
+      std::shared_ptr<TRITONSERVER_Server>& server, UnorderedMapType& options,
+      triton::server::TraceManager* trace_manager,
+      const std::shared_ptr<SharedMemoryManager>& shm_manager,
+      const RestrictedFeatures& restricted_features,
+      std::unique_ptr<Server>* service);
 
   ~Server();
 
@@ -113,6 +119,16 @@ class Server {
       triton::server::TraceManager* trace_manager,
       const std::shared_ptr<SharedMemoryManager>& shm_manager,
       const Options& server_options);
+
+  static TRITONSERVER_Error* GetSocketOptions(
+      SocketOptions& options, UnorderedMapType& options_map);
+  static TRITONSERVER_Error* GetSslOptions(
+      SslOptions& options, UnorderedMapType& options_map);
+  static TRITONSERVER_Error* GetKeepAliveOptions(
+      KeepAliveOptions& options, UnorderedMapType& options_map);
+
+  static TRITONSERVER_Error* GetOptions(
+      Options& options, UnorderedMapType& options_map);
 
   std::shared_ptr<TRITONSERVER_Server> tritonserver_;
   TraceManager* trace_manager_;

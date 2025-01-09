@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2022-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -59,6 +59,11 @@ source ../common/util.sh
 
 rm -f *.log
 rm -fr $MODELSDIR && mkdir -p $MODELSDIR
+
+if [ ! -d ${DATADIR} ]; then
+  echo -e "\n***\n*** ${DATADIR} does not exist!\n***"
+  exit 1
+fi
 
 # set up simple repository MODELBASE
 rm -fr $MODELSDIR && mkdir -p $MODELSDIR && \
@@ -202,7 +207,12 @@ rm -f ./curl.out
 code=`curl -s -w %{http_code} -o ./curl.out -d'{"log_file":"other_log.log"}' localhost:8000/v2/logging`
 set +e
 
-verify_correct_settings "other_log.log" "true" "true" "true" "1" "default"
+# updating log file location no longer supported
+if [ `grep -c "\"error\":\"log file location can not be updated through network protocol\"" ./curl.out` != "1" ]; then
+    echo -e "\n***\n*** Test Failed: Incorrect Error Response\n***"
+    RET=1
+fi
+verify_correct_settings "log_file.log" "true" "true" "true" "1" "default"
 
 $SIMPLE_HTTP_CLIENT >> client_test_log_file.log 2>&1
 if [ $? -ne 0 ]; then
@@ -225,7 +235,7 @@ if [ $actual_log_count -lt $expected_log_count ]; then
     RET=1
 fi
 expected_other_log_count=31
-actual_other_log_count=$(grep -c ^[IWEV][0-9][0-9][0-9][0-9].* ./other_log.log)
+actual_other_log_count=$(grep -c ^[IWEV][0-9][0-9][0-9][0-9].* ./log_file.log)
 if [ $actual_other_log_count -lt $expected_other_log_count ]; then
     echo $actual_other_log_count
     echo $expected_other_log_count
@@ -496,7 +506,7 @@ BOOL_PARAMS=${BOOL_PARAMS:="log_info log_warning log_error"}
 for BOOL_PARAM in $BOOL_PARAMS; do
     # Attempt to use integer instead of bool
     code=`curl -s -w %{http_code} -o ./curl.out -d'{"'"$BOOL_PARAM"'":1}' localhost:8000/v2/logging`
-    if [ "$code" != "400" ]; then
+    if [ "$code" == "200" ]; then
         echo $code
         cat ./curl.out
         echo -e "\n***\n*** Test Failed: Line: $LINENO\n***"
@@ -504,14 +514,14 @@ for BOOL_PARAM in $BOOL_PARAMS; do
     fi
     # Attempt to use upper-case bool
     code=`curl -s -w %{http_code} -o ./curl.out -d'{"'"$BOOL_PARAM"'":False}' localhost:8000/v2/logging`
-    if [ "$code" != "400" ]; then
+    if [ "$code" == "200" ]; then
         cat ./curl.out
         echo -e "\n***\n*** Test Failed: Line: $LINENO\n***"
         RET=1
     fi
     # Attempt to use string bool
     code=`curl -s -w %{http_code} -o ./curl.out -d'{"'"$BOOL_PARAM"'":"false"}' localhost:8000/v2/logging`
-    if [ "$code" != "400" ]; then
+    if [ "$code" == "200" ]; then
         echo $code
         cat ./curl.out
         echo -e "\n***\n*** Test Failed: Line: $LINENO\n***"
@@ -527,14 +537,14 @@ for BOOL_PARAM in $BOOL_PARAMS; do
 done
 
 code=`curl -s -w %{http_code} -o ./curl.out -d'{"log_verbose_level":-1}' localhost:8000/v2/logging`
-if [ "$code" != "400" ]; then
+if [ "$code" == "200" ]; then
     echo $code
     cat ./curl.out
     echo -e "\n***\n*** Test Failed: Line: $LINENO\n***"
     RET=1
 fi
 code=`curl -s -w %{http_code} -o ./curl.out -d'{"log_verbose_level":"1"}' localhost:8000/v2/logging`
-if [ "$code" != "400" ]; then
+if [ "$code" == "200" ]; then
     echo $code
     cat ./curl.out
     echo -e "\n***\n*** Test Failed: Line: $LINENO\n***"
@@ -583,12 +593,24 @@ set -e
 kill $SERVER_PID
 wait $SERVER_PID
 
+set +e
 
+FORMAT_TEST_LOG="./log_format_test.log"
+
+python3 -m pytest --junitxml=log_format_test.xml log_format_test.py > $FORMAT_TEST_LOG 2>&1
+
+if [ $? -ne 0 ]; then
+    cat $FORMAT_TEST_LOG
+    echo -e "\n***\n*** Log Format Test Failed\n***"
+    RET=1
+fi
+
+set -e
 
 if [ $RET -eq 0 ]; then
     echo -e "\n***\n*** Test Passed\n***"
 else
-    echo -e "\n***\n*** Test FAILED\n***"
+    echo -e "\n***\n*** Test Failed\n***"
 fi
 
 

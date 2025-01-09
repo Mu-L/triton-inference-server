@@ -1,5 +1,5 @@
 <!--
-# Copyright 2018-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2018-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -795,6 +795,23 @@ scheduler will:
 6. Repeat step 3-5 until no more internal requests should be sent, and then
    response to the inference request with the tensors mapped to the ensemble
    output names.
+
+Unlike other models, ensemble models do not support "instance_group" field in
+the model configuration. The reason is that the ensemble scheduler itself
+is mainly an event-driven scheduler with very minimal overhead so its
+almost never the bottleneck of the pipeline. The composing models
+within the ensemble can be individually scaled up or down with their
+respective `instance_group` settings. To optimize your model pipeline
+performance, you can use
+[Model Analyzer](https://github.com/triton-inference-server/model_analyzer)
+to find the optimal model configurations.
+
+When crafting the ensemble steps, it is useful to note the distinction between
+*key* and *value* on the `input_map`/`output_map`:
+* *key*: An `input`/`output` tensor name on the composing model.
+* *value*: A tensor name on the ensemble model, which acts as an identifier
+connecting ensemble `input`/`output` to those on the composing model and between
+composing models.
 
 #### Additional Resources
 

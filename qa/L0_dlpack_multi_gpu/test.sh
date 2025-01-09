@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -27,7 +27,7 @@
 
 SERVER=/opt/tritonserver/bin/tritonserver
 SERVER_ARGS="--model-repository=`pwd`/models --log-verbose=1"
-CLIENT_PY=./python_unittest.py
+CLIENT_PY=./test_infer_shm_leak.py
 CLIENT_LOG="./client.log"
 EXPECTED_NUM_TESTS="1"
 TEST_RESULT_FILE='test_results.txt'
@@ -41,7 +41,7 @@ source ../common/util.sh
 
 # Uninstall the non CUDA version of PyTorch
 pip3 uninstall -y torch
-pip3 install torch==1.13.0+cu117 -f https://download.pytorch.org/whl/torch_stable.html
+pip3 install torch==2.3.1+cu118 -f https://download.pytorch.org/whl/torch_stable.html
 pip3 install tensorflow
 
 # Install CuPy for testing non_blocking compute streams
@@ -52,8 +52,8 @@ rm -fr *.log ./models
 mkdir -p models/dlpack_test/1/
 cp ../python_models/dlpack_test/model.py models/dlpack_test/1/
 cp ../python_models/dlpack_test/config.pbtxt models/dlpack_test
-cp ../L0_backend_python/python_unittest.py .
-sed -i 's#sys.path.append("../../common")#sys.path.append("../common")#g' python_unittest.py
+cp ../L0_backend_python/test_infer_shm_leak.py .
+sed -i 's#sys.path.append("../../common")#sys.path.append("../common")#g' test_infer_shm_leak.py
 
 run_server
 if [ "$SERVER_PID" == "0" ]; then
@@ -64,18 +64,11 @@ fi
 
 set +e
 export MODEL_NAME="dlpack_test"
-python3 $CLIENT_PY > $CLIENT_LOG 2>&1
+python3 -m pytest --junitxml=dlpack_multi_gpu.report.xml $CLIENT_PY > $CLIENT_LOG 2>&1
 
 if [ $? -ne 0 ]; then
     echo -e "\n***\n*** python_unittest.py FAILED. \n***"
     RET=1
-else
-    check_test_results $TEST_RESULT_FILE $EXPECTED_NUM_TESTS
-    if [ $? -ne 0 ]; then
-        cat $CLIENT_LOG
-        echo -e "\n***\n*** Test Result Verification Failed\n***"
-        RET=1
-    fi
 fi
 set -e
 
@@ -85,10 +78,9 @@ wait $SERVER_PID
 if [ $RET -eq 1 ]; then
     cat $CLIENT_LOG
     cat $SERVER_LOG
-    echo -e "\n***\n*** Unittest test FAILED. \n***"
+    echo -e "\n***\n*** dlpack_multi_gpu test FAILED. \n***"
 else
-    echo -e "\n***\n*** Unittest test PASSED. \n***"
+    echo -e "\n***\n*** dlpack_multi_gpu test PASSED. \n***"
 fi
 
-export CUDA_VISIBLE_DEVICES=0
 exit $RET

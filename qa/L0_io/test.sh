@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -54,7 +54,7 @@ LD_LIBRARY_PATH=/opt/tritonserver/lib:$LD_LIBRARY_PATH
 rm -f $CLIENT_LOG*
 
 # PyTorch is required for the Python backend dlpack add sub models
-pip3 install torch==1.13.0+cu117 -f https://download.pytorch.org/whl/torch_stable.html
+pip3 install torch==2.3.1+cu118 -f https://download.pytorch.org/whl/torch_stable.html
 RET=0
 
 # Prepare float32 models with basic config
@@ -68,8 +68,7 @@ for trial in graphdef savedmodel onnx libtorch plan python python_dlpack; do
             cp ../python_models/add_sub/config.pbtxt $MODELSDIR/${full}/. && \
             (cd $MODELSDIR/${full} && \
                     sed -i "s/label_filename:.*//" config.pbtxt && \
-                    sed -i "0,/name:.*/{s/name:.*/name: \"${full}\"/}" config.pbtxt && \
-                                        echo "max_batch_size: 64" >> config.pbtxt)
+                    echo "max_batch_size: 64" >> config.pbtxt)
 
         # ensemble version of the model.
         mkdir -p $MODELSDIR/fan_${full}/1 && \

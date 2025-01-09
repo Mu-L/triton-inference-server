@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2021-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -32,100 +32,15 @@ from typing import List, Tuple
 
 import gen_ensemble_model_utils as emu
 import numpy as np
+from gen_common import (
+    np_to_model_dtype,
+    np_to_onnx_dtype,
+    np_to_torch_dtype,
+    np_to_trt_dtype,
+)
 
 FLAGS = None
 np_dtype_string = np.dtype(object)
-
-
-def np_to_model_dtype(np_dtype):
-    if np_dtype == bool:
-        return "TYPE_BOOL"
-    elif np_dtype == np.int8:
-        return "TYPE_INT8"
-    elif np_dtype == np.int16:
-        return "TYPE_INT16"
-    elif np_dtype == np.int32:
-        return "TYPE_INT32"
-    elif np_dtype == np.int64:
-        return "TYPE_INT64"
-    elif np_dtype == np.uint8:
-        return "TYPE_UINT8"
-    elif np_dtype == np.uint16:
-        return "TYPE_UINT16"
-    elif np_dtype == np.float16:
-        return "TYPE_FP16"
-    elif np_dtype == np.float32:
-        return "TYPE_FP32"
-    elif np_dtype == np.float64:
-        return "TYPE_FP64"
-    elif np_dtype == np_dtype_string:
-        return "TYPE_STRING"
-    return None
-
-
-def np_to_onnx_dtype(np_dtype):
-    if np_dtype == bool:
-        return onnx.TensorProto.BOOL
-    elif np_dtype == np.int8:
-        return onnx.TensorProto.INT8
-    elif np_dtype == np.int16:
-        return onnx.TensorProto.INT16
-    elif np_dtype == np.int32:
-        return onnx.TensorProto.INT32
-    elif np_dtype == np.int64:
-        return onnx.TensorProto.INT64
-    elif np_dtype == np.uint8:
-        return onnx.TensorProto.UINT8
-    elif np_dtype == np.uint16:
-        return onnx.TensorProto.UINT16
-    elif np_dtype == np.float16:
-        return onnx.TensorProto.FLOAT16
-    elif np_dtype == np.float32:
-        return onnx.TensorProto.FLOAT
-    elif np_dtype == np.float64:
-        return onnx.TensorProto.DOUBLE
-    elif np_dtype == np_dtype_string:
-        return onnx.TensorProto.STRING
-
-
-def np_to_trt_dtype(np_dtype):
-    if np_dtype == bool:
-        return trt.bool
-    elif np_dtype == np.int8:
-        return trt.int8
-    elif np_dtype == np.int32:
-        return trt.int32
-    elif np_dtype == np.float16:
-        return trt.float16
-    elif np_dtype == np.float32:
-        return trt.float32
-    return None
-
-
-def np_to_torch_dtype(np_dtype):
-    if np_dtype == bool:
-        return torch.bool
-    elif np_dtype == np.int8:
-        return torch.int8
-    elif np_dtype == np.int16:
-        return torch.int16
-    elif np_dtype == np.int32:
-        return torch.int
-    elif np_dtype == np.int64:
-        return torch.long
-    elif np_dtype == np.uint8:
-        return torch.uint8
-    elif np_dtype == np.uint16:
-        return None  # Not supported in Torch
-    elif np_dtype == np.float16:
-        return None
-    elif np_dtype == np.float32:
-        return torch.float
-    elif np_dtype == np.float64:
-        return torch.double
-    elif np_dtype == np_dtype_string:
-        return List[str]
-    return None
 
 
 def create_onnx_modelfile_wo_initial_state(
@@ -982,154 +897,11 @@ instance_group [
         cfile.write(config)
 
 
-def create_plan_fixed_modelfile(models_dir, model_version, max_batch, dtype, shape):
+def create_plan_modelfile(models_dir, model_version, max_batch, dtype, shape):
     trt_dtype = np_to_trt_dtype(dtype)
     TRT_LOGGER = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(TRT_LOGGER)
     network = builder.create_network()
-    in0 = network.add_input("INPUT", trt_dtype, shape)
-    in_state0 = network.add_input("INPUT_STATE", trt_dtype, shape)
-    start0 = network.add_input("START", trt_dtype, [1 for i in shape])
-    network.add_input("READY", trt_dtype, [1 for i in shape])
-    constant_1_data = trt.Weights(np.ones([1 for i in shape], dtype=dtype))
-    constant_1 = network.add_constant([1 for i in shape], constant_1_data)
-    not_start = network.add_elementwise(
-        constant_1.get_output(0), start0, trt.ElementWiseOperation.SUB
-    )
-    not_start.set_output_type(0, trt_dtype)
-    internal_state = network.add_elementwise(
-        in_state0, not_start.get_output(0), trt.ElementWiseOperation.PROD
-    )
-    out0 = network.add_elementwise(
-        internal_state.get_output(0), in0, trt.ElementWiseOperation.SUM
-    )
-    out0_state = network.add_elementwise(
-        internal_state.get_output(0), in0, trt.ElementWiseOperation.SUM
-    )
-
-    out0.get_output(0).name = "OUTPUT"
-    network.mark_output(out0.get_output(0))
-
-    out0_state.get_output(0).name = "OUTPUT_STATE"
-    network.mark_output(out0_state.get_output(0))
-
-    config = builder.create_builder_config()
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 20)
-    builder.max_batch_size = max(1, max_batch)
-    try:
-        engine_bytes = builder.build_serialized_network(network, config)
-    except AttributeError:
-        engine = builder.build_engine(network, config)
-        engine_bytes = engine.serialize()
-        del engine
-    del network
-
-    model_name = tu.get_sequence_model_name(
-        "plan_nobatch" if max_batch == 0 else "plan", dtype
-    )
-    model_version_dir = models_dir + "/" + model_name + "/" + str(model_version)
-
-    try:
-        os.makedirs(model_version_dir)
-    except OSError as ex:
-        pass  # ignore existing dir
-
-    with open(model_version_dir + "/model.plan", "wb") as f:
-        f.write(engine_bytes)
-
-
-def create_plan_fixed_rf_modelfile(models_dir, model_version, max_batch, dtype, shape):
-    trt_dtype = np_to_trt_dtype(dtype)
-    trt_memory_format = trt.TensorFormat.LINEAR
-
-    TRT_LOGGER = trt.Logger(trt.Logger.INFO)
-    builder = trt.Builder(TRT_LOGGER)
-    network = builder.create_network()
-    in0 = network.add_input("INPUT", trt_dtype, shape)
-    in_state0 = network.add_input("INPUT_STATE", trt_dtype, shape)
-    start0 = network.add_input("START", trt_dtype, [1 for i in shape])
-    ready0 = network.add_input("READY", trt_dtype, [1 for i in shape])
-    constant_1_data = trt.Weights(np.ones([1 for i in shape], dtype=dtype))
-    constant_1 = network.add_constant([1 for i in shape], constant_1_data)
-    not_start = network.add_elementwise(
-        constant_1.get_output(0), start0, trt.ElementWiseOperation.SUB
-    )
-    not_start.set_output_type(0, trt_dtype)
-
-    internal_state = network.add_elementwise(
-        in_state0, not_start.get_output(0), trt.ElementWiseOperation.PROD
-    )
-    out0 = network.add_elementwise(
-        internal_state.get_output(0), in0, trt.ElementWiseOperation.SUM
-    )
-    out0_state = network.add_elementwise(
-        internal_state.get_output(0), in0, trt.ElementWiseOperation.SUM
-    )
-
-    out0.get_output(0).name = "OUTPUT"
-    network.mark_output(out0.get_output(0))
-    out0.get_output(0).dtype = trt_dtype
-
-    out0_state.get_output(0).name = "OUTPUT_STATE"
-    network.mark_output(out0_state.get_output(0))
-    out0_state.get_output(0).dtype = trt_dtype
-
-    in0.allowed_formats = 1 << int(trt_memory_format)
-    in_state0.allowed_formats = 1 << int(trt_memory_format)
-    start0.allowed_formats = 1 << int(trt_memory_format)
-    ready0.allowed_formats = 1 << int(trt_memory_format)
-    out0.get_output(0).allowed_formats = 1 << int(trt_memory_format)
-    out0_state.get_output(0).allowed_formats = 1 << int(trt_memory_format)
-
-    if trt_dtype == trt.int8:
-        in0.dynamic_range = (-128.0, 127.0)
-        in_state0.dynamic_range = (-128.0, 127.0)
-        out0.dynamic_range = (-128.0, 127.0)
-        out0_state.dynamic_range = (-128.0, 127.0)
-        start0.dynamic_range = (-128.0, 127.0)
-        ready0.dynamic_range = (-128.0, 127.0)
-
-    flags = 1 << int(trt.BuilderFlag.STRICT_TYPES)
-
-    if trt_dtype == trt.int8:
-        flags |= 1 << int(trt.BuilderFlag.INT8)
-    elif trt_dtype == trt.float16:
-        flags |= 1 << int(trt.BuilderFlag.FP16)
-
-    config = builder.create_builder_config()
-    config.flags = flags
-    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 20)
-    builder.max_batch_size = max(1, max_batch)
-    try:
-        engine_bytes = builder.build_serialized_network(network, config)
-    except AttributeError:
-        engine = builder.build_engine(network, config)
-        engine_bytes = engine.serialize()
-        del engine
-
-    model_name = tu.get_sequence_model_name(
-        "plan_nobatch" if max_batch == 0 else "plan", dtype
-    )
-    model_version_dir = models_dir + "/" + model_name + "/" + str(model_version)
-
-    try:
-        os.makedirs(model_version_dir)
-    except OSError as ex:
-        pass  # ignore existing dir
-
-    with open(model_version_dir + "/model.plan", "wb") as f:
-        f.write(engine_bytes)
-
-
-def create_plan_dynamic_modelfile(models_dir, model_version, max_batch, dtype, shape):
-    trt_dtype = np_to_trt_dtype(dtype)
-    TRT_LOGGER = trt.Logger(trt.Logger.INFO)
-    builder = trt.Builder(TRT_LOGGER)
-
-    # EXPLICIT_BATCH must be used when the dimension is variable
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    )
 
     unit_shape = [1] * len(shape)
     if max_batch != 0:
@@ -1137,15 +909,17 @@ def create_plan_dynamic_modelfile(models_dir, model_version, max_batch, dtype, s
         start0 = network.add_input("START", trt_dtype, [-1] + unit_shape)
         ready0 = network.add_input("READY", trt_dtype, [-1] + unit_shape)
         in_state0 = network.add_input("INPUT_STATE", trt_dtype, [-1] + shape)
+        # Append the dimension by 1 so that broadcasting works properly
+        constant_1_data = trt.Weights(np.ones(unit_shape + [1], dtype=dtype))
+        constant_1 = network.add_constant(unit_shape + [1], constant_1_data)
     else:
         in0 = network.add_input("INPUT", trt_dtype, shape)
         start0 = network.add_input("START", trt_dtype, unit_shape)
         ready0 = network.add_input("READY", trt_dtype, unit_shape)
         in_state0 = network.add_input("INPUT_STATE", trt_dtype, shape)
+        constant_1_data = trt.Weights(np.ones(unit_shape, dtype=dtype))
+        constant_1 = network.add_constant(unit_shape, constant_1_data)
 
-    # Append the dimension by 1 so that broadcasting works properly
-    constant_1_data = trt.Weights(np.ones(unit_shape + [1], dtype=dtype))
-    constant_1 = network.add_constant(unit_shape + [1], constant_1_data)
     not_start = network.add_elementwise(
         constant_1.get_output(0), start0, trt.ElementWiseOperation.SUB
     )
@@ -1227,19 +1001,13 @@ def create_plan_dynamic_modelfile(models_dir, model_version, max_batch, dtype, s
         f.write(engine_bytes)
 
 
-def create_plan_dynamic_rf_modelfile(
-    models_dir, model_version, max_batch, dtype, shape
-):
+def create_plan_rf_modelfile(models_dir, model_version, max_batch, dtype, shape):
     trt_dtype = np_to_trt_dtype(dtype)
     trt_memory_format = trt.TensorFormat.LINEAR
 
     TRT_LOGGER = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(TRT_LOGGER)
-
-    # EXPLICIT_BATCH must be used when the dimension is variable
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    )
+    network = builder.create_network()
 
     unit_shape = [1] * len(shape)
     if max_batch != 0:
@@ -1247,15 +1015,17 @@ def create_plan_dynamic_rf_modelfile(
         start0 = network.add_input("START", trt_dtype, [-1] + unit_shape)
         ready0 = network.add_input("READY", trt_dtype, [-1] + unit_shape)
         in_state0 = network.add_input("INPUT_STATE", trt_dtype, [-1] + shape)
+        # Append the dimension by 1 so that broadcasting works properly
+        constant_1_data = trt.Weights(np.ones(unit_shape + [1], dtype=dtype))
+        constant_1 = network.add_constant(unit_shape + [1], constant_1_data)
     else:
         in0 = network.add_input("INPUT", trt_dtype, shape)
         start0 = network.add_input("START", trt_dtype, unit_shape)
         ready0 = network.add_input("READY", trt_dtype, unit_shape)
-        in_state0 = network.add_input("INPUT_STATE", trt_dtype, [-1] + shape)
+        in_state0 = network.add_input("INPUT_STATE", trt_dtype, shape)
+        constant_1_data = trt.Weights(np.ones(unit_shape, dtype=dtype))
+        constant_1 = network.add_constant(unit_shape, constant_1_data)
 
-    # Append the dimension by 1 so that broadcasting works properly
-    constant_1_data = trt.Weights(np.ones(unit_shape + [1], dtype=dtype))
-    constant_1 = network.add_constant(unit_shape + [1], constant_1_data)
     not_start = network.add_elementwise(
         constant_1.get_output(0), start0, trt.ElementWiseOperation.SUB
     )
@@ -1290,7 +1060,9 @@ def create_plan_dynamic_rf_modelfile(
         start0.dynamic_range = (-128.0, 127.0)
         ready0.dynamic_range = (-128.0, 127.0)
 
-    flags = 1 << int(trt.BuilderFlag.STRICT_TYPES)
+    flags = 1 << int(trt.BuilderFlag.DIRECT_IO)
+    flags |= 1 << int(trt.BuilderFlag.PREFER_PRECISION_CONSTRAINTS)
+    flags |= 1 << int(trt.BuilderFlag.REJECT_EMPTY_ALGORITHMS)
 
     if trt_dtype == trt.int8:
         flags |= 1 << int(trt.BuilderFlag.INT8)
@@ -1360,28 +1132,14 @@ def create_plan_dynamic_rf_modelfile(
         f.write(engine_bytes)
 
 
-def create_plan_modelfile(models_dir, model_version, max_batch, dtype, shape):
+def create_plan_models(models_dir, model_version, max_batch, dtype, shape):
     if not tu.validate_for_trt_model(dtype, dtype, dtype, shape, shape, shape):
         return
 
     if dtype != np.float32:
-        if not tu.shape_is_fixed(shape):
-            create_plan_dynamic_rf_modelfile(
-                models_dir, model_version, max_batch, dtype, shape
-            )
-        else:
-            create_plan_fixed_rf_modelfile(
-                models_dir, model_version, max_batch, dtype, shape
-            )
+        create_plan_rf_modelfile(models_dir, model_version, max_batch, dtype, shape)
     else:
-        if not tu.shape_is_fixed(shape):
-            create_plan_dynamic_modelfile(
-                models_dir, model_version, max_batch, dtype, shape
-            )
-        else:
-            create_plan_fixed_modelfile(
-                models_dir, model_version, max_batch, dtype, shape
-            )
+        create_plan_modelfile(models_dir, model_version, max_batch, dtype, shape)
 
 
 def create_plan_modelconfig(models_dir, model_version, max_batch, dtype, shape):
@@ -1488,10 +1246,10 @@ def create_models(models_dir, dtype, shape, initial_state, no_batch=True):
             suffix = [1, 1]
 
         create_plan_modelconfig(models_dir, model_version, 8, dtype, shape + suffix)
-        create_plan_modelfile(models_dir, model_version, 8, dtype, shape + suffix)
+        create_plan_models(models_dir, model_version, 8, dtype, shape + suffix)
         if no_batch:
             create_plan_modelconfig(models_dir, model_version, 0, dtype, shape + suffix)
-            create_plan_modelfile(models_dir, model_version, 0, dtype, shape + suffix)
+            create_plan_models(models_dir, model_version, 0, dtype, shape + suffix)
 
     if FLAGS.libtorch:
         suffix = []

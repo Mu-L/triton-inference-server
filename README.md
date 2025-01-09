@@ -1,5 +1,5 @@
 <!--
-# Copyright 2018-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2018-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -30,21 +30,22 @@
 
 [![License](https://img.shields.io/badge/License-BSD3-lightgrey.svg)](https://opensource.org/licenses/BSD-3-Clause)
 
-**LATEST RELEASE: You are currently on the main branch which tracks
-under-development progress towards the next release. The current release is
-version [2.36.0](https://github.com/triton-inference-server/server/tree/r23.07)
-and corresponds to the 23.07 container release on
-[NVIDIA GPU Cloud (NGC)](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/tritonserver).**
+>[!WARNING]
+>You are currently on the `main` branch which tracks under-development progress
+>towards the next release. The current release is version [2.53.0](https://github.com/triton-inference-server/server/releases/latest)
+>and corresponds to the 24.12 container release on NVIDIA GPU Cloud (NGC).
 
-----
 Triton Inference Server is an open source inference serving software that
 streamlines AI inferencing. Triton enables teams to deploy any AI model from
 multiple deep learning and machine learning frameworks, including TensorRT,
 TensorFlow, PyTorch, ONNX, OpenVINO, Python, RAPIDS FIL, and more. Triton
-supports inference across cloud, data center,edge and embedded devices on NVIDIA
-GPUs, x86 and ARM CPU, or AWS Inferentia. Triton delivers optimized performance
-for many query types, including real time, batched, ensembles and audio/video
-streaming.
+Inference Server supports inference across cloud, data center, edge and embedded
+devices on NVIDIA GPUs, x86 and ARM CPU, or AWS Inferentia. Triton Inference
+Server delivers optimized performance for many query types, including real time,
+batched, ensembles and audio/video streaming. Triton inference Server is part of
+[NVIDIA AI Enterprise](https://www.nvidia.com/en-us/data-center/products/ai-enterprise/),
+a software platform that accelerates the data science pipeline and streamlines
+the development and deployment of production AI.
 
 Major features include:
 
@@ -60,6 +61,8 @@ Major features include:
   for stateful models
 - Provides [Backend API](https://github.com/triton-inference-server/backend) that
   allows adding custom backends and pre/post processing operations
+- Supports writing custom backends in python, a.k.a.
+  [Python-based backends.](https://github.com/triton-inference-server/backend/blob/main/docs/python_based_backends.md#python-based-backends)
 - Model pipelines using
   [Ensembling](docs/user_guide/architecture.md#ensemble-models) or [Business
   Logic Scripting
@@ -88,16 +91,16 @@ Inference Server with the
 
 ```bash
 # Step 1: Create the example model repository
-git clone -b r23.07 https://github.com/triton-inference-server/server.git
+git clone -b r24.12 https://github.com/triton-inference-server/server.git
 cd server/docs/examples
 ./fetch_models.sh
 
 # Step 2: Launch triton from the NGC Triton container
-docker run --gpus=1 --rm --net=host -v ${PWD}/model_repository:/models nvcr.io/nvidia/tritonserver:23.07-py3 tritonserver --model-repository=/models
+docker run --gpus=1 --rm --net=host -v ${PWD}/model_repository:/models nvcr.io/nvidia/tritonserver:24.12-py3 tritonserver --model-repository=/models
 
 # Step 3: Sending an Inference Request
 # In a separate console, launch the image_client example from the NGC Triton SDK container
-docker run -it --rm --net=host nvcr.io/nvidia/tritonserver:23.07-py3-sdk
+docker run -it --rm --net=host nvcr.io/nvidia/tritonserver:24.12-py3-sdk
 /workspace/install/bin/image_client -m densenet_onnx -c 3 -s INCEPTION /workspace/images/mug.jpg
 
 # Inference should return the following
@@ -136,6 +139,7 @@ images.
 - [Build Triton Inference Server for Windows 10](docs/customization_guide/build.md#building-for-windows-10)
 - Examples for deploying Triton Inference Server with Kubernetes and Helm on [GCP](deploy/gcp/README.md),
   [AWS](deploy/aws/README.md), and [NVIDIA FleetCommand](deploy/fleetcommand/README.md)
+- [Secure Deployment Considerations](docs/customization_guide/deploy.md)
 
 ### Using Triton
 
@@ -174,7 +178,7 @@ configuration](docs/user_guide/model_configuration.md) for the model.
   [Backend-Platform Support Matrix](https://github.com/triton-inference-server/backend/blob/main/docs/backend_platform_support_matrix.md)
   to learn which backends are supported on your target platform.
 - Learn how to [optimize performance](docs/user_guide/optimization.md) using the
-  [Performance Analyzer](https://github.com/triton-inference-server/client/blob/main/src/c++/perf_analyzer/README.md)
+  [Performance Analyzer](https://github.com/triton-inference-server/perf_analyzer/blob/main/README.md)
   and
   [Model Analyzer](https://github.com/triton-inference-server/model_analyzer)
 - Learn how to [manage loading and unloading models](docs/user_guide/model_management.md) in

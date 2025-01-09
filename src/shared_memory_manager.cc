@@ -1,4 +1,4 @@
-// Copyright 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions
@@ -67,8 +67,10 @@ SharedMemoryManager::GetCUDAHandle(
 
 TRITONSERVER_Error*
 SharedMemoryManager::GetMemoryInfo(
-    const std::string& name, size_t offset, void** shm_mapped_addr,
-    TRITONSERVER_MemoryType* memory_type, int64_t* device_id)
+    const std::string& name, size_t offset, size_t byte_size,
+    void** shm_mapped_addr, TRITONSERVER_MemoryType* memory_type,
+    int64_t* device_id,
+    std::shared_ptr<const SharedMemoryManager::SharedMemoryInfo>* shm_info)
 {
   return TRITONSERVER_ErrorNew(
       TRITONSERVER_ERROR_UNSUPPORTED,
@@ -120,6 +122,7 @@ SharedMemoryManager::UnregisterHelper(
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "common.h"
@@ -143,6 +146,51 @@ OpenSharedMemoryRegion(const std::string& shm_key, int* shm_fd)
   }
 
   return nullptr;
+}
+
+TRITONSERVER_Error*
+GetSharedMemoryRegionSize(
+    const std::string& shm_key, int shm_fd, size_t* shm_region_size)
+{
+  struct stat file_status;
+  if (fstat(shm_fd, &file_status) == -1) {
+    LOG_VERBOSE(1) << "fstat on shm_fd failed, errno: " << errno;
+    return TRITONSERVER_ErrorNew(
+        TRITONSERVER_ERROR_INTERNAL,
+        std::string("Invalid shared memory region: '" + shm_key + "'").c_str());
+  }
+
+  // According to POSIX standard, type off_t can be negative, so for sake of
+  // catching possible under/overflows, assert that the size is non-negative.
+  if (file_status.st_size < 0) {
+    LOG_VERBOSE(1) << "File size of shared memory region must be non-negative";
+    return TRITONSERVER_ErrorNew(
+        TRITONSERVER_ERROR_INTERNAL,
+        std::string("Invalid shared memory region: '" + shm_key + "'").c_str());
+  }
+
+  *shm_region_size = static_cast<size_t>(file_status.st_size);
+  return nullptr;  // success
+}
+
+TRITONSERVER_Error*
+CheckSharedMemoryRegionSize(
+    const std::string& name, const std::string& shm_key, int shm_fd,
+    size_t offset, size_t byte_size)
+{
+  size_t shm_region_size = 0;
+  RETURN_IF_ERR(GetSharedMemoryRegionSize(shm_key, shm_fd, &shm_region_size));
+  // User-provided offset and byte_size should not go out-of-bounds.
+  if ((offset + byte_size) > shm_region_size) {
+    return TRITONSERVER_ErrorNew(
+        TRITONSERVER_ERROR_INVALID_ARG,
+        std::string(
+            "failed to register shared memory region '" + name +
+            "': invalid args")
+            .c_str());
+  }
+
+  return nullptr;  // success
 }
 
 TRITONSERVER_Error*
@@ -208,11 +256,85 @@ OpenCudaIPCRegion(
   cudaError_t err = cudaIpcOpenMemHandle(
       data_ptr, *cuda_shm_handle, cudaIpcMemLazyEnablePeerAccess);
   if (err != cudaSuccess) {
+    // Log detailed error message and send generic error to client
+    LOG_ERROR << "failed to open CUDA IPC handle: " << cudaGetErrorString(err);
     return TRITONSERVER_ErrorNew(
-        TRITONSERVER_ERROR_INTERNAL, std::string(
-                                         "failed to open CUDA IPC handle: " +
-                                         std::string(cudaGetErrorString(err)))
-                                         .c_str());
+        TRITONSERVER_ERROR_INVALID_ARG,
+        std::string("failed to register shared memory region: invalid args")
+            .c_str());
+  }
+
+  return nullptr;
+}
+
+// Using `cudaGetDriverEntryPoint` from CUDA runtime API to get CUDA driver
+// entry point. This approach is used to avoid linking against CUDA driver
+// library so that when Triton is built with GPU support, it can still be run on
+// CPU-only environments.
+TRITONSERVER_Error*
+GetCudaDriverEntryPoint(const char* name, void** func_ptr)
+{
+  cudaError_t err = cudaGetDriverEntryPoint(name, func_ptr, cudaEnableDefault);
+  if (err != cudaSuccess) {
+    LOG_ERROR << "Failed to get CUDA driver entry point for " << name << ": "
+              << cudaGetErrorString(err);
+    return TRITONSERVER_ErrorNew(
+        TRITONSERVER_ERROR_INTERNAL,
+        std::string("Failed to get CUDA driver entry point").c_str());
+  }
+  return nullptr;
+}
+
+TRITONSERVER_Error*
+GetCudaSharedMemoryRegionSize(CUdeviceptr data_ptr, size_t& shm_region_size)
+{
+  void* cu_mem_get_address_range = nullptr;
+  void* cu_get_error_string = nullptr;
+  RETURN_IF_ERR(GetCudaDriverEntryPoint(
+      "cuMemGetAddressRange", &cu_mem_get_address_range));
+  RETURN_IF_ERR(
+      GetCudaDriverEntryPoint("cuGetErrorString", &cu_get_error_string));
+
+  CUdeviceptr* base = nullptr;
+  CUresult result = ((
+      CUresult(*)(CUdeviceptr*, size_t*, CUdeviceptr))cu_mem_get_address_range)(
+      base, &shm_region_size, data_ptr);
+  if (result != CUDA_SUCCESS) {
+    const char* errorString;
+    if (((CUresult(*)(CUresult, const char**))cu_get_error_string)(
+            result, &errorString) != CUDA_SUCCESS) {
+      return TRITONSERVER_ErrorNew(
+          TRITONSERVER_ERROR_INTERNAL, "Failed to get CUDA error string");
+    }
+    return TRITONSERVER_ErrorNew(
+        TRITONSERVER_ERROR_INTERNAL,
+        std::string(
+            "Failed to get CUDA address range: " + std::string(errorString))
+            .c_str());
+  }
+  return nullptr;
+}
+
+TRITONSERVER_Error*
+CheckCudaSharedMemoryRegionSize(
+    const std::string& name, CUdeviceptr data_ptr, size_t byte_size)
+{
+  size_t shm_region_size = 0;
+  auto err = GetCudaSharedMemoryRegionSize(data_ptr, shm_region_size);
+
+  // User-provided offset and byte_size should not go out-of-bounds.
+  if (err != nullptr || byte_size > shm_region_size) {
+    if (err != nullptr) {
+      // Log detailed error message and send generic error to client
+      LOG_ERROR << TRITONSERVER_ErrorMessage(err);
+      TRITONSERVER_ErrorDelete(err);
+    }
+    return TRITONSERVER_ErrorNew(
+        TRITONSERVER_ERROR_INVALID_ARG,
+        std::string(
+            "failed to register shared memory region '" + name +
+            "': invalid args")
+            .c_str());
   }
 
   return nullptr;
@@ -249,6 +371,7 @@ SharedMemoryManager::RegisterSystemSharedMemory(
   for (auto itr = shared_memory_map_.begin(); itr != shared_memory_map_.end();
        ++itr) {
     if (itr->second->shm_key_ == shm_key) {
+      // FIXME: Consider invalid file descriptors after close
       shm_fd = itr->second->shm_fd_;
       break;
     }
@@ -258,6 +381,10 @@ SharedMemoryManager::RegisterSystemSharedMemory(
   if (shm_fd == -1) {
     RETURN_IF_ERR(OpenSharedMemoryRegion(shm_key, &shm_fd));
   }
+
+  // Enforce that registered region is in-bounds of shm file object.
+  RETURN_IF_ERR(
+      CheckSharedMemoryRegionSize(name, shm_key, shm_fd, offset, byte_size));
 
   // Mmap and then close the shared memory descriptor
   TRITONSERVER_Error* err_mmap =
@@ -282,9 +409,9 @@ SharedMemoryManager::RegisterSystemSharedMemory(
   }
 
   shared_memory_map_.insert(std::make_pair(
-      name, std::unique_ptr<SharedMemoryInfo>(new SharedMemoryInfo(
+      name, std::make_shared<SharedMemoryManager::SharedMemoryInfo>(
                 name, shm_key, offset, byte_size, shm_fd, mapped_addr,
-                TRITONSERVER_MEMORY_CPU, 0))));
+                TRITONSERVER_MEMORY_CPU, 0)));
 
   return nullptr;  // success
 }
@@ -311,21 +438,16 @@ SharedMemoryManager::RegisterCUDASharedMemory(
   void* mapped_addr;
 
   // Get CUDA shared memory base address
-  TRITONSERVER_Error* err =
-      OpenCudaIPCRegion(cuda_shm_handle, &mapped_addr, device_id);
-  if (err != nullptr) {
-    return TRITONSERVER_ErrorNew(
-        TRITONSERVER_ERROR_INVALID_ARG,
-        std::string(
-            "failed to register CUDA shared memory region '" + name +
-            "': " + TRITONSERVER_ErrorMessage(err))
-            .c_str());
-  }
+  RETURN_IF_ERR(OpenCudaIPCRegion(cuda_shm_handle, &mapped_addr, device_id));
+
+  // Enforce that registered region is in-bounds of shm file object.
+  RETURN_IF_ERR(CheckCudaSharedMemoryRegionSize(
+      name, reinterpret_cast<CUdeviceptr>(mapped_addr), byte_size));
 
   shared_memory_map_.insert(std::make_pair(
-      name, std::unique_ptr<CUDASharedMemoryInfo>(new CUDASharedMemoryInfo(
+      name, std::make_shared<SharedMemoryManager::CUDASharedMemoryInfo>(
                 name, "", 0, byte_size, 0, mapped_addr, TRITONSERVER_MEMORY_GPU,
-                device_id, cuda_shm_handle))));
+                device_id, cuda_shm_handle)));
 
   return nullptr;  // success
 }
@@ -333,8 +455,10 @@ SharedMemoryManager::RegisterCUDASharedMemory(
 
 TRITONSERVER_Error*
 SharedMemoryManager::GetMemoryInfo(
-    const std::string& name, size_t offset, void** shm_mapped_addr,
-    TRITONSERVER_MemoryType* memory_type, int64_t* device_id)
+    const std::string& name, size_t offset, size_t byte_size,
+    void** shm_mapped_addr, TRITONSERVER_MemoryType* memory_type,
+    int64_t* device_id,
+    std::shared_ptr<const SharedMemoryManager::SharedMemoryInfo>* shm_info)
 {
   // protect shared_memory_map_ from concurrent access
   std::lock_guard<std::mutex> lock(mu_);
@@ -346,6 +470,36 @@ SharedMemoryManager::GetMemoryInfo(
         std::string("Unable to find shared memory region: '" + name + "'")
             .c_str());
   }
+
+  // validate offset
+  size_t shm_region_end = 0;
+  if (it->second->kind_ == TRITONSERVER_MEMORY_CPU) {
+    shm_region_end = it->second->offset_;
+  }
+  if (it->second->byte_size_ > 0) {
+    shm_region_end += it->second->byte_size_ - 1;
+  }
+  if (offset > shm_region_end) {
+    return TRITONSERVER_ErrorNew(
+        TRITONSERVER_ERROR_INVALID_ARG,
+        std::string("Invalid offset for shared memory region: '" + name + "'")
+            .c_str());
+  }
+  // validate byte_size + offset is within memory bounds
+  size_t total_req_shm = offset + byte_size - 1;
+  if (total_req_shm > shm_region_end) {
+    return TRITONSERVER_ErrorNew(
+        TRITONSERVER_ERROR_INVALID_ARG,
+        std::string(
+            "Invalid offset + byte size for shared memory region: '" + name +
+            "'")
+            .c_str());
+  }
+
+  if (shm_info != nullptr) {
+    *shm_info = std::static_pointer_cast<const SharedMemoryInfo>(it->second);
+  }
+
   if (it->second->kind_ == TRITONSERVER_MEMORY_CPU) {
     *shm_mapped_addr = (void*)((uint8_t*)it->second->mapped_addr_ +
                                it->second->offset_ + offset);
@@ -413,11 +567,19 @@ SharedMemoryManager::GetStatus(
   } else {
     auto it = shared_memory_map_.find(name);
     if (it == shared_memory_map_.end()) {
-      return TRITONSERVER_ErrorNew(
-          TRITONSERVER_ERROR_NOT_FOUND,
-          std::string(
-              "Unable to find system shared memory region: '" + name + "'")
-              .c_str());
+      if (memory_type == TRITONSERVER_MEMORY_GPU) {
+        return TRITONSERVER_ErrorNew(
+            TRITONSERVER_ERROR_NOT_FOUND,
+            std::string(
+                "Unable to find cuda shared memory region: '" + name + "'")
+                .c_str());
+      } else {
+        return TRITONSERVER_ErrorNew(
+            TRITONSERVER_ERROR_NOT_FOUND,
+            std::string(
+                "Unable to find system shared memory region: '" + name + "'")
+                .c_str());
+      }
     }
 
     if (it->second->kind_ != memory_type) {
@@ -484,6 +646,7 @@ SharedMemoryManager::UnregisterAll(TRITONSERVER_MemoryType memory_type)
         TRITONSERVER_Error* err = UnregisterHelper(it->first, memory_type);
         if (err != nullptr) {
           unregister_fails.push_back(it->first);
+          LOG_VERBOSE(1) << TRITONSERVER_ErrorMessage(err);
         }
       }
     }
@@ -497,6 +660,7 @@ SharedMemoryManager::UnregisterAll(TRITONSERVER_MemoryType memory_type)
         ;
         if (err != nullptr) {
           unregister_fails.push_back(it->first);
+          LOG_VERBOSE(1) << TRITONSERVER_ErrorMessage(err);
         }
       }
     }
@@ -521,6 +685,14 @@ SharedMemoryManager::UnregisterHelper(
   // Must hold the lock on register_mu_ while calling this function.
   auto it = shared_memory_map_.find(name);
   if (it != shared_memory_map_.end() && it->second->kind_ == memory_type) {
+    if (it->second.use_count() > 1) {
+      it->second->awaiting_unregister_ = true;
+      LOG_VERBOSE(1)
+          << "Shared memory region '" << name
+          << "' will be unregistered after in-flight requests complete.";
+      return nullptr;
+    }
+
     if (it->second->kind_ == TRITONSERVER_MEMORY_CPU) {
       RETURN_IF_ERR(
           UnmapSharedMemory(it->second->mapped_addr_, it->second->byte_size_));

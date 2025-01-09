@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -27,137 +27,128 @@
 
 ############################################################################
 ## This script generates the model repository needed for TensorRT testing
-## testing on the Jetson Xavier. Generating these models requires having
-## TensorRT on the system.
-##
-## 1. Update Jetpack version to match what is being used by the
-## tritonserver release being tested.
-##
-## 2. Set CUDA_DEVICE to the ID of the CUDA device present on the
-## system that you want to target for the generated models.
-##
-## 3. Run this script to create a '/tmp/<TRITON_VERSION>_xavier' directory
-## containing all the TensorRT models needed for CI testing.
-##
-## 4. Copy all non-TensorRT models from the dlcluster directory
-## '/mnt/dldata/inferenceserver/<TRITON_VERSION>' to
-## '/mnt/dldata/inferenceserver/<TRITON_VERSION>_xavier'.
-##
-## 5. Copy the generated models from '/tmp/<TRITON_VERSION>_xavier' to the
-## dlcluster directory '/mnt/dldata/inferenceserver/<TRITON_VERSION>_xavier'.
-##
-## 6. Remember to delete the '/tmp/<TRITON_VERSION>_xavier' directory after.
-##
+## on the Jetson device. Generating these models requires having TensorRT
+## container.
 ############################################################################
-
-TRITON_VERSION=${TRITON_VERSION:=23.06}
+#!/bin/bash -xe
+# Make all generated files accessible outside of container
+umask 0000
+# Set the version of the models
+TRITON_VERSION=${TRITON_VERSION:=24.12}
+# Set the CUDA device to use
 CUDA_DEVICE=${RUNNER_ID:=0}
+# Set TensorRT image
+TENSORRT_IMAGE=${TENSORRT_IMAGE:=nvcr.io/nvidia/tensorrt:$TRITON_VERSION-py3-igpu}
+UBUNTU_IMAGE=${UBUNTU_IMAGE:=ubuntu:24.04}
 
-HOST_BUILD_DIR=${HOST_BUILD_DIR:=/tmp}
-TMP_DIR=$HOST_BUILD_DIR/${TRITON_VERSION}
+# Set CI specific parameters
+DOCKER_GPU_ARGS=${DOCKER_GPU_ARGS:-$([[ $RUNNER_GPUS =~ ^[0-9] ]] && eval $NV_DOCKER_ARGS || echo "--gpus device=$CUDA_DEVICE" )}
 
-SRCDIR=$HOST_BUILD_DIR/gen_srcdir
-DESTDIR=$TMP_DIR/qa_model_repository
+############################################################################
+# Check if Docker volume exists
+############################################################################
+CI_JOB_ID=${CI_JOB_ID:=$(date +%Y%m%d_%H%M)}
+DOCKER_VOLUME=${DOCKER_VOLUME:=volume_gen_qa_model_repositor_${CI_JOB_ID}}
+if ! docker volume inspect $DOCKER_VOLUME > /dev/null 2>&1; then
+    echo "Docker volume $DOCKER_VOLUME does not exist. Creating..."
+    docker volume create $DOCKER_VOLUME
+    docker volume inspect $DOCKER_VOLUME
+fi
 
-DATADEPENDENTDIR=$TMP_DIR/qa_trt_data_dependent_model_repository
-DYNASEQDESTDIR=$TMP_DIR/qa_dyna_sequence_model_repository
-DYNASEQIMPLICITDESTDIR=$TMP_DIR/qa_dyna_sequence_implicit_model_repository
-FORMATDESTDIR=$TMP_DIR/qa_trt_format_model_repository
-IDENTITYBIGDESTDIR=$TMP_DIR/qa_identity_big_model_repository
-IDENTITYDESTDIR=$TMP_DIR/qa_identity_model_repository
-IMPLICITSEQDESTDIR=$TMP_DIR/qa_sequence_implicit_model_repository
-RAGGEDDESTDIR=$TMP_DIR/qa_ragged_model_repository
-RESHAPEDESTDIR=$TMP_DIR/qa_reshape_model_repository
-SEQDESTDIR=$TMP_DIR/qa_sequence_model_repository
-SHAPEDESTDIR=$TMP_DIR/qa_shapetensor_model_repository
-VARDESTDIR=$TMP_DIR/qa_variable_model_repository
-VARIMPLICITSEQDESTDIR=$TMP_DIR/qa_variable_sequence_implicit_model_repository
-VARSEQDESTDIR=$TMP_DIR/qa_variable_sequence_model_repository
+docker rm -f $DOCKER_VOLUME
+docker run --rm -v $DOCKER_VOLUME:/mnt -w /mnt/$CI_JOB_ID $UBUNTU_IMAGE mkdir -p gen_srcdir ${TRITON_VERSION}
+docker create --name $DOCKER_VOLUME -v $DOCKER_VOLUME:/mnt -w /mnt/$CI_JOB_ID $UBUNTU_IMAGE
+docker cp . $DOCKER_VOLUME:/mnt/$CI_JOB_ID/gen_srcdir
 
+# Set model output directories
+VOLUME_BUILD_DIR=${VOLUME_BUILD_DIR:=/mnt/$CI_JOB_ID}
+VOLUME_SRCDIR=${VOLUME_SRCDIR:=$VOLUME_BUILD_DIR/gen_srcdir}
 
-rm -fr $DESTDIR
-rm -fr $DATADEPENDENTDIR
-rm -fr $DYNASEQDESTDIR
-rm -fr $DYNASEQIMPLICITDESTDIR
-rm -fr $FORMATDESTDIR
-rm -fr $IDENTITYBIGDESTDIR
-rm -fr $IDENTITYDESTDIR
-rm -fr $IMPLICITSEQDESTDIR
-rm -fr $RAGGEDDESTDIR
-rm -fr $RESHAPEDESTDIR
-rm -fr $SEQDESTDIR
-rm -fr $SHAPEDESTDIR
-rm -fr $VARDESTDIR
-rm -fr $VARIMPLICITSEQDESTDIR
-rm -fr $VARSEQDESTDIR
+VOLUME_DESTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_model_repository
+VOLUME_DATADEPENDENTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_trt_data_dependent_model_repository
+VOLUME_DYNASEQDESTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_dyna_sequence_model_repository
+VOLUME_DYNASEQIMPLICITDESTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_dyna_sequence_implicit_model_repository
+VOLUME_FORMATDESTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_trt_format_model_repository
+VOLUME_IDENTITYBIGDESTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_identity_big_model_repository
+VOLUME_IDENTITYDESTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_identity_model_repository
+VOLUME_IMPLICITSEQDESTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_sequence_implicit_model_repository
+VOLUME_RAGGEDDESTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_ragged_model_repository
+VOLUME_RESHAPEDESTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_reshape_model_repository
+VOLUME_SEQDESTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_sequence_model_repository
+VOLUME_SHAPEDESTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_shapetensor_model_repository
+VOLUME_VARDESTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_variable_model_repository
+VOLUME_VARIMPLICITSEQDESTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_variable_sequence_implicit_model_repository
+VOLUME_VARSEQDESTDIR=$VOLUME_BUILD_DIR/$TRITON_VERSION/qa_variable_sequence_model_repository
 
-mkdir -p $SRCDIR
-mkdir -p $DESTDIR
+# Clean up host working directory
+docker run --rm -v $DOCKER_VOLUME:/mnt -w /mnt/$CI_JOB_ID $UBUNTU_IMAGE \
+mkdir -p \
+$VOLUME_SRCDIR \
+$VOLUME_DESTDIR \
+$VOLUME_DATADEPENDENTDIR \
+$VOLUME_DYNASEQDESTDIR \
+$VOLUME_DYNASEQIMPLICITDESTDIR \
+$VOLUME_FORMATDESTDIR \
+$VOLUME_IDENTITYBIGDESTDIR \
+$VOLUME_IDENTITYDESTDIR \
+$VOLUME_IMPLICITSEQDESTDIR \
+$VOLUME_RAGGEDDESTDIR \
+$VOLUME_RESHAPEDESTDIR \
+$VOLUME_SEQDESTDIR \
+$VOLUME_SHAPEDESTDIR \
+$VOLUME_VARDESTDIR \
+$VOLUME_VARIMPLICITSEQDESTDIR \
+$VOLUME_VARSEQDESTDIR
 
-mkdir -p $DATADEPENDENTDIR
-mkdir -p $DYNASEQDESTDIR
-mkdir -p $DYNASEQIMPLICITDESTDIR
-mkdir -p $FORMATDESTDIR
-mkdir -p $IDENTITYBIGDESTDIR
-mkdir -p $IDENTITYDESTDIR
-mkdir -p $IMPLICITSEQDESTDIR
-mkdir -p $RAGGEDDESTDIR
-mkdir -p $RESHAPEDESTDIR
-mkdir -p $SEQDESTDIR
-mkdir -p $SHAPEDESTDIR
-mkdir -p $VARDESTDIR
-mkdir -p $VARIMPLICITSEQDESTDIR
-mkdir -p $VARSEQDESTDIR
+# Set TensorRT model generation script name
+TRT_MODEL_SCRIPT=gen.TensorRT.gen_jetson_trt_models.cmds
 
-cp ./gen_ensemble_model_utils.py $SRCDIR/.
-cp ./gen_qa_dyna_sequence_implicit_models.py $SRCDIR/.
-cp ./gen_qa_dyna_sequence_models.py $SRCDIR/.
-cp ./gen_qa_identity_models.py $SRCDIR/.
-cp ./gen_qa_implicit_models.py $SRCDIR/.
-cp ./gen_qa_models.py $SRCDIR/.
-cp ./gen_qa_noshape_models.py $SRCDIR/.
-cp ./gen_qa_ragged_models.py $SRCDIR/.
-cp ./gen_qa_reshape_models.py $SRCDIR/.
-cp ./gen_qa_sequence_models.py $SRCDIR/.
-cp ./gen_qa_trt_data_dependent_shape.py $SRCDIR/.
-cp ./gen_qa_trt_format_models.py $SRCDIR/.
-cp ./gen_qa_trt_plugin_models.py $SRCDIR/.
-cp ./test_util.py $SRCDIR/.
-
-# TensorRT
-set -e
+# Set script to generate TensorRT models
+cat > $TRT_MODEL_SCRIPT <<EOF
+#!/bin/bash -xe
+# Make all generated files accessible outside of container
+umask 0000
+nvidia-smi -L || true
 export TRT_SUPPRESS_DEPRECATION_WARNINGS=1
-cd $SRCDIR
+ldconfig || true
+
+cd $VOLUME_SRCDIR
 # Models using shape tensor i/o
-python3 $SRCDIR/gen_qa_identity_models.py --tensorrt-shape-io --models_dir=$SHAPEDESTDIR
-python3 $SRCDIR/gen_qa_sequence_models.py --tensorrt-shape-io --models_dir=$SHAPEDESTDIR
-python3 $SRCDIR/gen_qa_dyna_sequence_models.py --tensorrt-shape-io --models_dir=$SHAPEDESTDIR
-chmod -R 777 $SHAPEDESTDIR
-python3 $SRCDIR/gen_qa_models.py --tensorrt --models_dir=$DESTDIR
-chmod -R 777 $DESTDIR
-python3 $SRCDIR/gen_qa_models.py --tensorrt --variable --models_dir=$VARDESTDIR
-chmod -R 777 $VARDESTDIR
-python3 $SRCDIR/gen_qa_identity_models.py --tensorrt --models_dir=$IDENTITYDESTDIR
-chmod -R 777 $IDENTITYDESTDIR
-python3 $SRCDIR/gen_qa_identity_models.py --tensorrt-big --models_dir=$IDENTITYBIGDESTDIR
-chmod -R 777 $IDENTITYBIGDESTDIR
-python3 $SRCDIR/gen_qa_reshape_models.py --tensorrt --variable --models_dir=$RESHAPEDESTDIR
-chmod -R 777 $RESHAPEDESTDIR
-python3 $SRCDIR/gen_qa_sequence_models.py --tensorrt --models_dir=$SEQDESTDIR
-chmod -R 777 $SEQDESTDIR
-python3 $SRCDIR/gen_qa_implicit_models.py --tensorrt --models_dir=$IMPLICITSEQDESTDIR
-chmod -R 777 $IMPLICITSEQDESTDIR
-python3 $SRCDIR/gen_qa_implicit_models.py --tensorrt --variable --models_dir=$VARIMPLICITSEQDESTDIR
-chmod -R 777 $VARIMPLICITSEQDESTDIR
-python3 $SRCDIR/gen_qa_dyna_sequence_models.py --tensorrt --models_dir=$DYNASEQDESTDIR
-chmod -R 777 $DYNASEQDESTDIR
-python3 $SRCDIR/gen_qa_sequence_models.py --tensorrt --variable --models_dir=$VARSEQDESTDIR
-chmod -R 777 $VARSEQDESTDIR
-python3 $SRCDIR/gen_qa_dyna_sequence_implicit_models.py --tensorrt --models_dir=$DYNASEQIMPLICITDESTDIR
-chmod -R 777 $DYNASEQIMPLICITDESTDIR
-python3 $SRCDIR/gen_qa_ragged_models.py --tensorrt --models_dir=$RAGGEDDESTDIR
-chmod -R 777 $RAGGEDDESTDIR
-python3 $SRCDIR/gen_qa_trt_format_models.py --models_dir=$FORMATDESTDIR
-chmod -R 777 $FORMATDESTDIR
-python3 $SRCDIR/gen_qa_trt_data_dependent_shape.py --models_dir=$DATADEPENDENTDIR
-chmod -R 777 $DATADEPENDENTDIR
+python3 $VOLUME_SRCDIR/gen_qa_identity_models.py --tensorrt-shape-io --models_dir=$VOLUME_SHAPEDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_sequence_models.py --tensorrt-shape-io --models_dir=$VOLUME_SHAPEDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_dyna_sequence_models.py --tensorrt-shape-io --models_dir=$VOLUME_SHAPEDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_models.py --tensorrt --models_dir=$VOLUME_DESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_models.py --tensorrt --variable --models_dir=$VOLUME_VARDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_identity_models.py --tensorrt --models_dir=$VOLUME_IDENTITYDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_identity_models.py --tensorrt-big --models_dir=$VOLUME_IDENTITYBIGDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_reshape_models.py --tensorrt --variable --models_dir=$VOLUME_RESHAPEDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_sequence_models.py --tensorrt --models_dir=$VOLUME_SEQDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_implicit_models.py --tensorrt --models_dir=$VOLUME_IMPLICITSEQDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_implicit_models.py --tensorrt --variable --models_dir=$VOLUME_VARIMPLICITSEQDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_dyna_sequence_models.py --tensorrt --models_dir=$VOLUME_DYNASEQDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_sequence_models.py --tensorrt --variable --models_dir=$VOLUME_VARSEQDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_dyna_sequence_implicit_models.py --tensorrt --models_dir=$VOLUME_DYNASEQIMPLICITDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_ragged_models.py --tensorrt --models_dir=$VOLUME_RAGGEDDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_trt_format_models.py --models_dir=$VOLUME_FORMATDESTDIR
+python3 $VOLUME_SRCDIR/gen_qa_trt_data_dependent_shape.py --models_dir=$VOLUME_DATADEPENDENTDIR
+
+EOF
+
+chmod a+x $TRT_MODEL_SCRIPT
+
+docker cp $TRT_MODEL_SCRIPT $DOCKER_VOLUME:$VOLUME_SRCDIR
+
+docker pull $TENSORRT_IMAGE
+
+docker run $DOCKER_GPU_ARGS \
+   --rm -v $DOCKER_VOLUME:/mnt \
+  $TENSORRT_IMAGE bash -xe $VOLUME_SRCDIR/$TRT_MODEL_SCRIPT
+
+# Copy generated models to /tmp/ if not running in CI
+if [ -z $CI ] ; then
+    echo "Copying generated models to /tmp/"
+    docker cp $DOCKER_VOLUME:$VOLUME_BUILD_DIR/$TRITON_VERSION /tmp/
+    echo "Removing Docker volume $DOCKER_VOLUME"
+    docker rm -f $DOCKER_VOLUME
+    docker volume rm $DOCKER_VOLUME
+fi

@@ -1,5 +1,5 @@
 <!--
-# Copyright 2021-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -125,7 +125,7 @@ apt-get install -y --no-install-recommends \
             jq
 
 pip3 install --upgrade wheel setuptools cython && \
-    pip3 install --upgrade grpcio-tools numpy attrdict pillow
+    pip3 install --upgrade grpcio-tools "numpy<2" attrdict pillow
 ```
 
 **Note**: OpenCV 4.2.0 is installed as a part of JetPack. It is one of the dependencies for the client build.
@@ -175,7 +175,7 @@ apt-get update && \
         jq
 
 pip3 install --upgrade wheel setuptools && \
-    pip3 install --upgrade grpcio-tools numpy attrdict pillow
+    pip3 install --upgrade grpcio-tools "numpy<2" attrdict pillow
 ```
 
 The PyTorch runtime dependencies are the same as the build dependencies listed above.
@@ -201,7 +201,7 @@ tritonserver --model-repository=/path/to/model_repo --backend-directory=/path/to
 ```
 
 **Note**:
-[perf_analyzer](https://github.com/triton-inference-server/client/blob/main/src/c++/perf_analyzer/README.md)
+[perf_analyzer](https://github.com/triton-inference-server/perf_analyzer/blob/main/README.md)
 is supported on Jetson, while the [model_analyzer](model_analyzer.md) is
 currently not available for Jetson. To execute `perf_analyzer` for C API, use
 the CLI flag `--service-kind=triton_c_api`:

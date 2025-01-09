@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2019-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -32,128 +32,18 @@ from builtins import range
 
 import gen_ensemble_model_utils as emu
 import numpy as np
+from gen_common import (
+    np_to_model_dtype,
+    np_to_onnx_dtype,
+    np_to_tf_dtype,
+    np_to_torch_dtype,
+    np_to_trt_dtype,
+    openvino_save_model,
+)
 
 FLAGS = None
 np_dtype_string = np.dtype(object)
 from typing import List
-
-
-def np_to_model_dtype(np_dtype):
-    if np_dtype == bool:
-        return "TYPE_BOOL"
-    elif np_dtype == np.int8:
-        return "TYPE_INT8"
-    elif np_dtype == np.int16:
-        return "TYPE_INT16"
-    elif np_dtype == np.int32:
-        return "TYPE_INT32"
-    elif np_dtype == np.int64:
-        return "TYPE_INT64"
-    elif np_dtype == np.uint8:
-        return "TYPE_UINT8"
-    elif np_dtype == np.uint16:
-        return "TYPE_UINT16"
-    elif np_dtype == np.float16:
-        return "TYPE_FP16"
-    elif np_dtype == np.float32:
-        return "TYPE_FP32"
-    elif np_dtype == np.float64:
-        return "TYPE_FP64"
-    elif np_dtype == np_dtype_string:
-        return "TYPE_STRING"
-    return None
-
-
-def np_to_tf_dtype(np_dtype):
-    if np_dtype == bool:
-        return tf.bool
-    elif np_dtype == np.int8:
-        return tf.int8
-    elif np_dtype == np.int16:
-        return tf.int16
-    elif np_dtype == np.int32:
-        return tf.int32
-    elif np_dtype == np.int64:
-        return tf.int64
-    elif np_dtype == np.uint8:
-        return tf.uint8
-    elif np_dtype == np.uint16:
-        return tf.uint16
-    elif np_dtype == np.float16:
-        return tf.float16
-    elif np_dtype == np.float32:
-        return tf.float32
-    elif np_dtype == np.float64:
-        return tf.float64
-    elif np_dtype == np_dtype_string:
-        return tf.string
-    return None
-
-
-def np_to_trt_dtype(np_dtype):
-    if np_dtype == bool:
-        return trt.bool
-    elif np_dtype == np.int8:
-        return trt.int8
-    elif np_dtype == np.int32:
-        return trt.int32
-    elif np_dtype == np.float16:
-        return trt.float16
-    elif np_dtype == np.float32:
-        return trt.float32
-    return None
-
-
-def np_to_onnx_dtype(np_dtype):
-    if np_dtype == bool:
-        return onnx.TensorProto.BOOL
-    elif np_dtype == np.int8:
-        return onnx.TensorProto.INT8
-    elif np_dtype == np.int16:
-        return onnx.TensorProto.INT16
-    elif np_dtype == np.int32:
-        return onnx.TensorProto.INT32
-    elif np_dtype == np.int64:
-        return onnx.TensorProto.INT64
-    elif np_dtype == np.uint8:
-        return onnx.TensorProto.UINT8
-    elif np_dtype == np.uint16:
-        return onnx.TensorProto.UINT16
-    elif np_dtype == np.float16:
-        return onnx.TensorProto.FLOAT16
-    elif np_dtype == np.float32:
-        return onnx.TensorProto.FLOAT
-    elif np_dtype == np.float64:
-        return onnx.TensorProto.DOUBLE
-    elif np_dtype == np_dtype_string:
-        return onnx.TensorProto.STRING
-    return None
-
-
-def np_to_torch_dtype(np_dtype):
-    if np_dtype == bool:
-        return torch.bool
-    elif np_dtype == np.int8:
-        return torch.int8
-    elif np_dtype == np.int16:
-        return torch.int16
-    elif np_dtype == np.int32:
-        return torch.int
-    elif np_dtype == np.int64:
-        return torch.long
-    elif np_dtype == np.uint8:
-        return torch.uint8
-    elif np_dtype == np.uint16:
-        return None  # Not supported in Torch
-    elif np_dtype == np.float16:
-        return None
-    elif np_dtype == np.float32:
-        return torch.float
-    elif np_dtype == np.float64:
-        return torch.double
-    elif np_dtype == np_dtype_string:
-        return List[str]
-    return None
 
 
 def create_tf_modelfile(
@@ -320,19 +210,23 @@ output [
             io_num,
             np_to_model_dtype(dtype),
             tu.shape_to_dims_str(input_shapes[io_num]),
-            "reshape: {{ shape: [ {} ] }}".format(
-                tu.shape_to_dims_str(input_model_shapes[io_num])
-            )
-            if input_shapes[io_num] != input_model_shapes[io_num]
-            else "",
+            (
+                "reshape: {{ shape: [ {} ] }}".format(
+                    tu.shape_to_dims_str(input_model_shapes[io_num])
+                )
+                if input_shapes[io_num] != input_model_shapes[io_num]
+                else ""
+            ),
             io_num,
             np_to_model_dtype(dtype),
             tu.shape_to_dims_str(output_shapes[io_num]),
-            "reshape: {{ shape: [ {} ] }}".format(
-                tu.shape_to_dims_str(output_model_shapes[io_num])
-            )
-            if output_shapes[io_num] != output_model_shapes[io_num]
-            else "",
+            (
+                "reshape: {{ shape: [ {} ] }}".format(
+                    tu.shape_to_dims_str(output_model_shapes[io_num])
+                )
+                if output_shapes[io_num] != output_model_shapes[io_num]
+                else ""
+            ),
         )
 
     try:
@@ -361,10 +255,17 @@ def create_plan_modelfile(
     builder = trt.Builder(TRT_LOGGER)
     network = builder.create_network()
 
+    profile = builder.create_optimization_profile()
     for io_num in range(io_cnt):
         input_name = "INPUT{}".format(io_num)
         output_name = "OUTPUT{}".format(io_num)
-        in0 = network.add_input(input_name, trt_dtype, input_shapes[io_num])
+
+        if max_batch == 0:
+            input_with_batchsize = [i for i in input_shapes[io_num]]
+        else:
+            input_with_batchsize = [-1] + [i for i in input_shapes[io_num]]
+
+        in0 = network.add_input(input_name, trt_dtype, input_with_batchsize)
         if input_shapes == output_shapes:
             out0 = network.add_identity(in0)
         else:
@@ -374,9 +275,23 @@ def create_plan_modelfile(
         out0.get_output(0).name = output_name
         network.mark_output(out0.get_output(0))
 
+        min_shape = []
+        opt_shape = []
+        max_shape = []
+
+        if max_batch != 0:
+            min_shape = min_shape + [1]
+            opt_shape = opt_shape + [max(1, max_batch)]
+            max_shape = max_shape + [max(1, max_batch)]
+        for i in input_shapes[io_num]:
+            min_shape = min_shape + [i]
+            opt_shape = opt_shape + [i]
+            max_shape = max_shape + [i]
+        profile.set_shape(input_name, min_shape, opt_shape, max_shape)
+
     config = builder.create_builder_config()
+    config.add_optimization_profile(profile)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 20)
-    builder.max_batch_size = max(1, max_batch)
     try:
         engine_bytes = builder.build_serialized_network(network, config)
     except AttributeError:
@@ -453,19 +368,23 @@ output [
             io_num,
             np_to_model_dtype(dtype),
             tu.shape_to_dims_str(input_shapes[io_num]),
-            "reshape: {{ shape: [ {} ] }}".format(
-                tu.shape_to_dims_str(input_model_shapes[io_num])
-            )
-            if input_shapes[io_num] != input_model_shapes[io_num]
-            else "",
+            (
+                "reshape: {{ shape: [ {} ] }}".format(
+                    tu.shape_to_dims_str(input_model_shapes[io_num])
+                )
+                if input_shapes[io_num] != input_model_shapes[io_num]
+                else ""
+            ),
             io_num,
             np_to_model_dtype(dtype),
             tu.shape_to_dims_str(output_shapes[io_num]),
-            "reshape: {{ shape: [ {} ] }}".format(
-                tu.shape_to_dims_str(output_model_shapes[io_num])
-            )
-            if output_shapes[io_num] != output_model_shapes[io_num]
-            else "",
+            (
+                "reshape: {{ shape: [ {} ] }}".format(
+                    tu.shape_to_dims_str(output_model_shapes[io_num])
+                )
+                if output_shapes[io_num] != output_model_shapes[io_num]
+                else ""
+            ),
         )
 
     try:
@@ -755,19 +674,23 @@ output [
             io_num,
             np_to_model_dtype(dtype),
             tu.shape_to_dims_str(input_shapes[io_num]),
-            "reshape: {{ shape: [ {} ] }}".format(
-                tu.shape_to_dims_str(input_model_shapes[io_num])
-            )
-            if input_shapes[io_num] != input_model_shapes[io_num]
-            else "",
+            (
+                "reshape: {{ shape: [ {} ] }}".format(
+                    tu.shape_to_dims_str(input_model_shapes[io_num])
+                )
+                if input_shapes[io_num] != input_model_shapes[io_num]
+                else ""
+            ),
             io_num,
             np_to_model_dtype(dtype),
             tu.shape_to_dims_str(output_shapes[io_num]),
-            "reshape: {{ shape: [ {} ] }}".format(
-                tu.shape_to_dims_str(output_model_shapes[io_num])
-            )
-            if output_shapes[io_num] != output_model_shapes[io_num]
-            else "",
+            (
+                "reshape: {{ shape: [ {} ] }}".format(
+                    tu.shape_to_dims_str(output_model_shapes[io_num])
+                )
+                if output_shapes[io_num] != output_model_shapes[io_num]
+                else ""
+            ),
         )
 
     try:
@@ -1012,13 +935,13 @@ def create_openvino_modelfile(
         in_name = "INPUT{}".format(io_num)
         out_name = "OUTPUT{}".format(io_num)
         openvino_inputs.append(
-            ng.parameter(
+            ov.opset1.parameter(
                 shape=batch_dim + input_shapes[io_num], dtype=dtype, name=in_name
             )
         )
 
         openvino_outputs.append(
-            ng.reshape(
+            ov.opset1.reshape(
                 openvino_inputs[io_num],
                 batch_dim + output_shapes[io_num],
                 name=out_name,
@@ -1026,17 +949,8 @@ def create_openvino_modelfile(
             )
         )
 
-    function = ng.impl.Function(openvino_outputs, openvino_inputs, model_name)
-    ie_network = IENetwork(ng.impl.Function.to_capsule(function))
-
-    try:
-        os.makedirs(model_version_dir)
-    except OSError as ex:
-        pass  # ignore existing dir
-
-    ie_network.serialize(
-        model_version_dir + "/model.xml", model_version_dir + "/model.bin"
-    )
+    model = ov.Model(openvino_outputs, openvino_inputs, model_name)
+    openvino_save_model(model_version_dir, model)
 
 
 def create_openvino_modelconfig(
@@ -1107,19 +1021,23 @@ output [
             io_num,
             np_to_model_dtype(dtype),
             tu.shape_to_dims_str(input_shapes[io_num]),
-            "reshape: {{ shape: [ {} ] }}".format(
-                tu.shape_to_dims_str(input_model_shapes[io_num])
-            )
-            if input_shapes[io_num] != input_model_shapes[io_num]
-            else "",
+            (
+                "reshape: {{ shape: [ {} ] }}".format(
+                    tu.shape_to_dims_str(input_model_shapes[io_num])
+                )
+                if input_shapes[io_num] != input_model_shapes[io_num]
+                else ""
+            ),
             io_num,
             np_to_model_dtype(dtype),
             tu.shape_to_dims_str(output_shapes[io_num]),
-            "reshape: {{ shape: [ {} ] }}".format(
-                tu.shape_to_dims_str(output_model_shapes[io_num])
-            )
-            if output_shapes[io_num] != output_model_shapes[io_num]
-            else "",
+            (
+                "reshape: {{ shape: [ {} ] }}".format(
+                    tu.shape_to_dims_str(output_model_shapes[io_num])
+                )
+                if output_shapes[io_num] != output_model_shapes[io_num]
+                else ""
+            ),
         )
 
     try:
@@ -1537,8 +1455,7 @@ if __name__ == "__main__":
         import torch
         from torch import nn
     if FLAGS.openvino:
-        from openvino.inference_engine import IENetwork
-        import ngraph as ng
+        import openvino.runtime as ov
 
     import test_util as tu
 

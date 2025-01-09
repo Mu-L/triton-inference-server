@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2018-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2018-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -33,19 +33,20 @@ import re
 
 FLAGS = None
 SKIP_EXTS = (
-    "jpeg",
-    "jpg",
-    "pgm",
-    "png",
-    "log",
-    "preprocessed",
-    "jmx",
-    "gz",
-    "json",
-    "pdf",
-    "so",
-    "onnx",
-    "svg",
+    ".jpeg",
+    ".jpg",
+    ".pgm",
+    ".png",
+    ".log",
+    ".preprocessed",
+    ".jmx",
+    ".gz",
+    ".json",
+    ".pdf",
+    ".so",
+    ".onnx",
+    ".svg",
+    "pull_request_template.md",
 )
 REPO_PATH_FROM_THIS_FILE = "../.."
 SKIP_PATHS = (
@@ -59,6 +60,8 @@ SKIP_PATHS = (
     "docs/_static/.gitattributes",
     "docs/examples/model_repository",
     "docs/examples/jetson",
+    "docs/repositories.txt",
+    "docs/exclusions.txt",
     "docker",
     "qa/common/cuda_op_kernel.cu.cc.patch",
     "qa/ensemble_models/mix_platform_float32_float32_float32/output0_labels.txt",
@@ -72,6 +75,7 @@ SKIP_PATHS = (
     "qa/L0_model_config/special_cases",
     "qa/L0_model_config/cli_messages/cli_override/expected",
     "qa/L0_model_config/cli_messages/cli_deprecation/expected",
+    "qa/L0_model_config/model_metrics",
     "qa/L0_model_namespacing/test_duplication",
     "qa/L0_model_namespacing/test_dynamic_resolution",
     "qa/L0_model_namespacing/test_ensemble_duplication",
@@ -85,6 +89,8 @@ SKIP_PATHS = (
     "qa/openvino_models/fixed_batch",
     "CITATION.cff",
     "TRITON_VERSION",
+    ".github/ISSUE_TEMPLATE",
+    ".github/PULL_REQUEST_TEMPLATE",
 )
 
 COPYRIGHT_YEAR_RE = "Copyright( \\(c\\))? 20[1-9][0-9](-(20)?[1-9][0-9])?(,((20[2-9][0-9](-(20)?[2-9][0-9])?)|([2-9][0-9](-[2-9][0-9])?)))*,? NVIDIA CORPORATION( & AFFILIATES)?. All rights reserved."
@@ -128,7 +134,7 @@ def visit(path):
         print("visiting " + path)
 
     for skip in SKIP_EXTS:
-        if path.endswith("." + skip):
+        if path.endswith(skip):
             if FLAGS.verbose:
                 print("skipping due to extension: " + path)
             return True
@@ -187,6 +193,8 @@ def visit(path):
             prefix = "# "
         elif line.startswith("// "):
             prefix = "// "
+        elif line.startswith(".. "):
+            prefix = ".. "
         elif not line.startswith(COPYRIGHT_YEAR_RE[0]):
             print(
                 "incorrect prefix for copyright line, allowed prefixes '# ' or '// ', for "

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2019-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -27,106 +27,32 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import argparse
+import ctypes
 import os
 
 import numpy as np
 import tensorrt as trt
+from gen_common import np_to_model_dtype, np_to_trt_dtype
 
 np_dtype_string = np.dtype(object)
 
 TRT_LOGGER = trt.Logger()
 
 trt.init_libnvinfer_plugins(TRT_LOGGER, "")
-PLUGIN_CREATORS = trt.get_plugin_registry().plugin_creator_list
-
-
-def np_to_model_dtype(np_dtype):
-    if np_dtype == bool:
-        return "TYPE_BOOL"
-    elif np_dtype == np.int8:
-        return "TYPE_INT8"
-    elif np_dtype == np.int16:
-        return "TYPE_INT16"
-    elif np_dtype == np.int32:
-        return "TYPE_INT32"
-    elif np_dtype == np.int64:
-        return "TYPE_INT64"
-    elif np_dtype == np.uint8:
-        return "TYPE_UINT8"
-    elif np_dtype == np.uint16:
-        return "TYPE_UINT16"
-    elif np_dtype == np.float16:
-        return "TYPE_FP16"
-    elif np_dtype == np.float32:
-        return "TYPE_FP32"
-    elif np_dtype == np.float64:
-        return "TYPE_FP64"
-    elif np_dtype == np_dtype_string:
-        return "TYPE_STRING"
-    return None
-
-
-def np_to_trt_dtype(np_dtype):
-    if np_dtype == bool:
-        return trt.bool
-    elif np_dtype == np.int8:
-        return trt.int8
-    elif np_dtype == np.int32:
-        return trt.int32
-    elif np_dtype == np.float16:
-        return trt.float16
-    elif np_dtype == np.float32:
-        return trt.float32
-    return None
 
 
 def get_trt_plugin(plugin_name):
     plugin = None
     field_collection = None
-    for plugin_creator in PLUGIN_CREATORS:
-        if (plugin_creator.name == "Normalize_TRT") and (
-            plugin_name == "Normalize_TRT"
+    plugin_creators = trt.get_plugin_registry().plugin_creator_list
+    for plugin_creator in plugin_creators:
+        if (plugin_creator.name == "CustomHardmax") and (
+            plugin_name == "CustomHardmax"
         ):
-            nbWeights = trt.PluginField(
-                "nbWeights", np.array([1], dtype=np.int32), trt.PluginFieldType.INT32
+            axis_attr = trt.PluginField(
+                "axis", np.array([0]), type=trt.PluginFieldType.INT32
             )
-            eps = trt.PluginField(
-                "eps",
-                np.array([0.00001], dtype=np.float32),
-                trt.PluginFieldType.FLOAT32,
-            )
-            weights = trt.PluginField(
-                "weights",
-                np.array([1] * 16, dtype=np.float32),
-                trt.PluginFieldType.FLOAT32,
-            )
-            field_collection = trt.PluginFieldCollection([weights, eps, nbWeights])
-            break
-        elif (plugin_creator.name == "CustomGeluPluginDynamic") and (
-            plugin_name == "CustomGeluPluginDynamic"
-        ):
-            type_id = trt.PluginField(
-                "type_id", np.array([0], np.int32), trt.PluginFieldType.INT32
-            )
-            bias = trt.PluginField(
-                "bias", np.array([[[1]]], np.float32), trt.PluginFieldType.FLOAT32
-            )
-            field_collection = trt.PluginFieldCollection([type_id, bias])
-            break
-        elif (plugin_creator.name == "CustomClipPlugin") and (
-            plugin_name == "CustomClipPlugin"
-        ):
-            min_clip = trt.PluginField(
-                "clipMin",
-                np.array([0.1], dtype=np.float32),
-                trt.PluginFieldType.FLOAT32,
-            )
-            max_clip = trt.PluginField(
-                "clipMax",
-                np.array([0.5], dtype=np.float32),
-                trt.PluginFieldType.FLOAT32,
-            )
-            field_collection = trt.PluginFieldCollection([min_clip, max_clip])
+            field_collection = trt.PluginFieldCollection([axis_attr])
             break
 
     if field_collection is None:
@@ -171,71 +97,61 @@ def create_plan_modelfile(
         + plugin_name
     )
 
-    # using explicit batch is necessary for CustomGeluPluginDynamic
-    if plugin_name == "CustomGeluPluginDynamic":
-        explicit_batch = 1 << (int)(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-        with trt.Builder(TRT_LOGGER) as builder, builder.create_network(
-            explicit_batch
-        ) as network:
-            input_layer = network.add_input(
-                name="INPUT0", dtype=trt_input_dtype, shape=input_shape
-            )
-            plugin_layer = network.add_plugin_v2(
-                inputs=[input_layer], plugin=get_trt_plugin(plugin_name)
-            )
-            plugin_layer.get_output(0).name = "OUTPUT0"
-            network.mark_output(plugin_layer.get_output(0))
-
-            config = builder.create_builder_config()
-            config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 20)
-
-            try:
-                engine_bytes = builder.build_serialized_network(network, config)
-            except AttributeError:
-                engine = builder.build_engine(network, config)
-                engine_bytes = engine.serialize()
-                del engine
-
-            model_version_dir = models_dir + "/" + model_name + "/" + str(model_version)
-
-            try:
-                os.makedirs(model_version_dir)
-            except OSError as ex:
-                pass  # ignore existing dir
-
-            with open(model_version_dir + "/model.plan", "wb") as f:
-                f.write(engine_bytes)
+    builder = trt.Builder(TRT_LOGGER)
+    network = builder.create_network()
+    if max_batch == 0:
+        input_with_batchsize = [i for i in input_shape]
     else:
-        with trt.Builder(TRT_LOGGER) as builder, builder.create_network() as network:
-            input_layer = network.add_input(
-                name="INPUT0", dtype=trt_input_dtype, shape=input_shape
-            )
-            plugin_layer = network.add_plugin_v2(
-                inputs=[input_layer], plugin=get_trt_plugin(plugin_name)
-            )
-            plugin_layer.get_output(0).name = "OUTPUT0"
-            network.mark_output(plugin_layer.get_output(0))
+        input_with_batchsize = [-1] + [i for i in input_shape]
 
-            config = builder.create_builder_config()
-            config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 20)
-            builder.max_batch_size = max(1, max_batch)
+    input_layer = network.add_input(
+        name="INPUT0", dtype=trt_input_dtype, shape=input_with_batchsize
+    )
+    plugin_layer = network.add_plugin_v2(
+        inputs=[input_layer], plugin=get_trt_plugin(plugin_name)
+    )
+    plugin_layer.get_output(0).name = "OUTPUT0"
+    network.mark_output(plugin_layer.get_output(0))
 
-            try:
-                engine_bytes = builder.build_serialized_network(network, config)
-            except AttributeError:
-                engine = builder.build_engine(network, config)
-                engine_bytes = engine.serialize()
-                del engine
+    min_shape = []
+    opt_shape = []
+    max_shape = []
+    for i in input_shape:
+        min_shape = min_shape + [i]
+        opt_shape = opt_shape + [i]
+        max_shape = max_shape + [i]
 
-            model_version_dir = models_dir + "/" + model_name + "/" + str(model_version)
+    profile = builder.create_optimization_profile()
+    if max_batch == 0:
+        profile.set_shape("INPUT0", min_shape, opt_shape, max_shape)
+    else:
+        profile.set_shape(
+            "INPUT0",
+            [1] + min_shape,
+            [max_batch] + opt_shape,
+            [max_batch] + max_shape,
+        )
 
-            try:
-                os.makedirs(model_version_dir)
-            except OSError as ex:
-                pass  # ignore existing dir
+    config = builder.create_builder_config()
+    config.add_optimization_profile(profile)
+    config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 20)
 
-            with open(model_version_dir + "/model.plan", "wb") as f:
-                f.write(engine_bytes)
+    try:
+        engine_bytes = builder.build_serialized_network(network, config)
+    except AttributeError:
+        engine = builder.build_engine(network, config)
+        engine_bytes = engine.serialize()
+        del engine
+
+    model_version_dir = models_dir + "/" + model_name + "/" + str(model_version)
+
+    try:
+        os.makedirs(model_version_dir)
+    except OSError as ex:
+        pass  # ignore existing dir
+
+    with open(model_version_dir + "/model.plan", "wb") as f:
+        f.write(engine_bytes)
 
 
 def create_plan_modelconfig(
@@ -313,14 +229,14 @@ output [
 def create_plugin_models(models_dir):
     model_version = 1
 
-    # custom CustomClipPlugin
+    # custom CustomHardmax
     create_plan_modelconfig(
         models_dir,
         8,
         model_version,
-        "CustomClipPlugin",
-        (16,),
-        (16,),
+        "CustomHardmax",
+        (2, 2),
+        (2, 2),
         np.float32,
         np.float32,
     )
@@ -328,19 +244,18 @@ def create_plugin_models(models_dir):
         models_dir,
         8,
         model_version,
-        "CustomClipPlugin",
-        (16,),
-        (16,),
+        "CustomHardmax",
+        (2, 2),
+        (2, 2),
         np.float32,
         np.float32,
     )
 
-    # default CustomGeluPluginDynamic plugin
     create_plan_modelconfig(
         models_dir,
         0,
         model_version,
-        "CustomGeluPluginDynamic",
+        "CustomHardmax",
         (16, 1, 1),
         (16, 1, 1),
         np.float32,
@@ -350,50 +265,24 @@ def create_plugin_models(models_dir):
         models_dir,
         0,
         model_version,
-        "CustomGeluPluginDynamic",
+        "CustomHardmax",
         (16, 1, 1),
         (16, 1, 1),
         np.float32,
         np.float32,
     )
 
-    # default Normalize_TRT
-    create_plan_modelconfig(
-        models_dir,
-        8,
-        model_version,
-        "Normalize_TRT",
-        (
-            16,
-            16,
-            16,
-        ),
-        (
-            16,
-            16,
-            16,
-        ),
-        np.float32,
-        np.float32,
-    )
-    create_plan_modelfile(
-        models_dir,
-        8,
-        model_version,
-        "Normalize_TRT",
-        (
-            16,
-            16,
-            16,
-        ),
-        (
-            16,
-            16,
-            16,
-        ),
-        np.float32,
-        np.float32,
-    )
+
+def windows_load_plugin_lib(win_plugin_dll):
+    if os.path.isfile(win_plugin_dll):
+        try:
+            ctypes.CDLL(win_plugin_dll, winmode=0)
+        except TypeError:
+            # winmode only introduced in python 3.8
+            ctypes.CDLL(win_plugin_dll)
+        return
+
+    raise IOError('Failed to load library: "{}".'.format(win_plugin_dll))
 
 
 if __name__ == "__main__":
@@ -401,8 +290,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--models_dir", type=str, required=True, help="Top-level model directory"
     )
+    parser.add_argument(
+        "--win_plugin_dll",
+        type=str,
+        required=False,
+        default="",
+        help="Path to Windows plugin .dll",
+    )
     FLAGS, unparsed = parser.parse_known_args()
 
     import test_util as tu
+
+    # Linux can leverage LD_PRELOAD. We must load the Windows plugin manually
+    # in order for it to be discovered in the registry.
+    if os.name == "nt":
+        windows_load_plugin_lib(FLAGS.win_plugin_dll)
 
     create_plugin_models(FLAGS.models_dir)

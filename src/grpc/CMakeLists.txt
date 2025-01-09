@@ -1,4 +1,4 @@
-# Copyright 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -37,18 +37,18 @@ add_library(
   stream_infer_handler.cc
 )
 
-target_compile_features(grpc-endpoint-library PRIVATE cxx_std_11)
+target_compile_features(grpc-endpoint-library PRIVATE cxx_std_${TRITON_MIN_CXX_STANDARD})
 if(CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
   target_compile_options(
     grpc-endpoint-library
     PRIVATE
-      /W1 /D_WIN32_WINNT=0x0A00 /EHsc
+      /W1 /D_WIN32_WINNT=0x0A00 /EHsc /Zc:preprocessor
   )
 else()
   target_compile_options(
     grpc-endpoint-library
     PRIVATE
-      -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations -Werror
+      -Wall -Wextra -Wno-unused-parameter -Wno-deprecated-declarations -Wno-error=maybe-uninitialized -Werror
   )
 endif()
 
@@ -83,9 +83,10 @@ target_include_directories(
 # add ${OPENTELEMETRY_CPP_INCLUDE_DIRS} to above target_include_directories
 # JIRA DLIS-4786
 if (NOT WIN32 AND ${TRITON_ENABLE_TRACING})
-  target_include_directories(
+  target_link_libraries(
     grpc-endpoint-library
-    PRIVATE ${OPENTELEMETRY_CPP_INCLUDE_DIRS}
+    PRIVATE
+    tracing-library
   )
 endif()
 

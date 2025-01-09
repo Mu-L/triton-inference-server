@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2020-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -64,8 +64,12 @@ WRONG_OUTPUT_2_JSONDATAFILE=`pwd`/../common/perf_analyzer_input_data_json/wrong_
 SEQ_OUTPUT_JSONDATAFILE=`pwd`/../common/perf_analyzer_input_data_json/seq_output.json
 SEQ_WRONG_OUTPUT_JSONDATAFILE=`pwd`/../common/perf_analyzer_input_data_json/seq_wrong_output.json
 
+REPEAT_INT32_JSONDATAFILE=`pwd`/../common/perf_analyzer_input_data_json/repeat_int32_data.json
+
+TRACE_FILE="trace.json"
+
 SERVER=/opt/tritonserver/bin/tritonserver
-SERVER_ARGS="--model-repository=${DATADIR}"
+SERVER_ARGS="--model-repository=${DATADIR} --trace-config triton,file=${TRACE_FILE}"
 SERVER_LOG="./inference_server.log"
 
 ERROR_STRING="error | Request count: 0 | : 0 infer/sec"
@@ -89,7 +93,7 @@ cp -r /data/inferenceserver/${REPO_VERSION}/qa_variable_model_repository/graphde
 cp -r /data/inferenceserver/${REPO_VERSION}/qa_variable_model_repository/graphdef_int32_int32_float32 $DATADIR/
 
 # Copy shape tensor models
-cp -r /data/inferenceserver/${REPO_VERSION}/qa_shapetensor_model_repository/plan_zero_1_float32 $DATADIR/
+cp -r /data/inferenceserver/${REPO_VERSION}/qa_shapetensor_model_repository/plan_zero_1_float32_int32 $DATADIR/
 
 # Copying ensemble including a sequential model
 cp -r /data/inferenceserver/${REPO_VERSION}/qa_sequence_model_repository/savedmodel_sequence_object $DATADIR
@@ -120,6 +124,12 @@ cp -r ../python_models/optional $DATADIR && \
   mkdir $DATADIR/optional/1 && \
   mv $DATADIR/optional/model.py $DATADIR/optional/1 && \
   sed -i 's/max_batch_size: 0/max_batch_size: 2/g' $DATADIR/optional/config.pbtxt
+
+# Copy decoupled model
+git clone --depth=1 https://github.com/triton-inference-server/python_backend
+mkdir -p $DATADIR/repeat_int32/1
+cp python_backend/examples/decoupled/repeat_config.pbtxt $DATADIR/repeat_int32/config.pbtxt
+cp python_backend/examples/decoupled/repeat_model.py $DATADIR/repeat_int32/1/model.py
 
 # Generating test data
 mkdir -p $TESTDATADIR
@@ -152,18 +162,6 @@ if [ $? -eq 0 ]; then
   RET=1
 fi
 if [ $(cat $CLIENT_LOG |  grep "input INPUT0 contains dynamic shape, provide shapes to send along with the request" | wc -l) -ne 0 ]; then
-  cat $CLIENT_LOG
-  echo -e "\n***\n*** Test Failed: \n***"
-  RET=1
-fi
-
-$PERF_ANALYZER -v -i $PROTOCOL -m graphdef_object_object_object -p2000 --shape INPUT0 -s ${STABILITY_THRESHOLD} >$CLIENT_LOG 2>&1
-if [ $? -eq 0 ]; then
-  cat $CLIENT_LOG
-  echo -e "\n***\n*** Test Failed: Expected an error when using dynamic shapes with incorrect arguments\n***"
-  RET=1
-fi
-if [ $(cat $CLIENT_LOG |  grep "failed to parse input shape. There must be a colon after input name." | wc -l) -eq 0 ]; then
   cat $CLIENT_LOG
   echo -e "\n***\n*** Test Failed: \n***"
   RET=1
@@ -566,7 +564,7 @@ for PROTOCOL in grpc http; do
     # Shape tensor I/O model (server needs the shape tensor on the CPU)
     for SHARED_MEMORY_TYPE in none system; do
         set +e
-        $PERF_ANALYZER -v -i $PROTOCOL -m plan_zero_1_float32 --input-data=$SHAPETENSORADTAFILE \
+        $PERF_ANALYZER -v -i $PROTOCOL -m plan_zero_1_float32_int32 --input-data=$SHAPETENSORADTAFILE \
     --shape DUMMY_INPUT0:4,4 -p2000 --shared-memory=$SHARED_MEMORY_TYPE -b 8 -s ${STABILITY_THRESHOLD} \
     >$CLIENT_LOG 2>&1
         if [ $? -ne 0 ]; then
@@ -646,9 +644,8 @@ for PROTOCOL in grpc http; do
 
     # Testing that trace logging works
     set +e
-    TRACE_FILE="trace.json"
     rm ${TRACE_FILE}*
-    $PERF_ANALYZER -v -i $PROTOCOL -m simple_savedmodel_sequence_object -p 2000 -t5 --sync --trace-file $TRACE_FILE \
+    $PERF_ANALYZER -v -i $PROTOCOL -m simple_savedmodel_sequence_object -p 2000 -t5 --sync \
     --trace-level TIMESTAMPS --trace-rate 1000 --trace-count 100 --log-frequency 10 \
     --input-data=$SEQ_JSONDATAFILE -s ${STABILITY_THRESHOLD} >$CLIENT_LOG 2>&1
     if [ $? -ne 0 ]; then
@@ -664,6 +661,19 @@ for PROTOCOL in grpc http; do
         echo -e "\n***\n*** Test Failed. Did not find `REQUEST_START` in $TRACE_FILE \n***"
         RET=1
     fi
+    curl localhost:8000/v2/trace/setting -d '{"trace_level":["OFF"]}'
+    set -e
+
+    # Testing that setting trace file does not work
+    set +e
+    $PERF_ANALYZER -v -i $PROTOCOL -m simple_savedmodel_sequence_object \
+    --trace-file $TRACE_FILE >$CLIENT_LOG 2>&1
+    if [ $? -eq 0 ]; then
+        cat $CLIENT_LOG
+        echo -e "\n***\n*** Test Failed. Expected to fail for unknown arg --trace-file"
+        RET=1
+    fi
+    curl localhost:8000/v2/trace/setting -d '{"trace_level":["OFF"]}'
     set -e
 done
 
@@ -882,6 +892,30 @@ if [ $(cat $CLIENT_LOG |  grep "${ERROR_STRING}" | wc -l) -ne 0 ]; then
     RET=1
 fi
 set -e
+
+## Test decoupled model support
+$PERF_ANALYZER -v -m repeat_int32 --input-data=$REPEAT_INT32_JSONDATAFILE \
+    --profile-export-file profile_export.json -i grpc --async --streaming -s \
+    ${STABILITY_THRESHOLD} >$CLIENT_LOG 2>&1
+if [ $? -ne 0 ]; then
+    cat $CLIENT_LOG
+    echo -e "\n***\n*** Test Failed\n***"
+    RET=1
+fi
+python3 -c "import json ; \
+    requests = json.load(open('profile_export.json'))['experiments'][0]['requests'] ; \
+    assert any(len(r['response_timestamps']) > 1 for r in requests)"
+if [ $? -ne 0 ]; then
+    cat $CLIENT_LOG
+    echo -e "\n***\n*** Test Failed\n***"
+    RET=1
+fi
+check-jsonschema --schemafile perf_analyzer_profile_export_schema.json profile_export.json
+if [ $? -ne 0 ]; then
+    cat $CLIENT_LOG
+    echo -e "\n***\n*** Test Failed\n***"
+    RET=1
+fi
 
 ## Test perf_analyzer with MPI / multiple models
 

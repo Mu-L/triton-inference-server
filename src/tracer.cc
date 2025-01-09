@@ -1,4 +1,4 @@
-// Copyright 2019-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// Copyright 2019-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions
@@ -28,22 +28,15 @@
 
 #include <stdlib.h>
 
-#include <unordered_map>
-
 #include "common.h"
 #include "triton/common/logging.h"
 #ifdef TRITON_ENABLE_GPU
 #include <cuda_runtime_api.h>
 #endif  // TRITON_ENABLE_GPU
 #ifndef _WIN32
-#include "opentelemetry/exporters/ostream/span_exporter_factory.h"
-#include "opentelemetry/exporters/otlp/otlp_http_exporter_factory.h"
 #include "opentelemetry/sdk/resource/semantic_conventions.h"
-namespace otlp = opentelemetry::exporter::otlp;
-namespace otel_trace_sdk = opentelemetry::sdk::trace;
-namespace otel_trace_api = opentelemetry::trace;
+#include "opentelemetry/sdk/trace/batch_span_processor_factory.h"
 namespace otel_common = opentelemetry::common;
-namespace otel_resource = opentelemetry::sdk::resource;
 #endif
 
 namespace triton { namespace server {
@@ -167,10 +160,7 @@ TraceManager::UpdateTraceSettingInternal(
                current_setting->log_frequency_specified_) ||
               (new_setting.log_frequency_ != nullptr)));
   const bool filepath_specified =
-      (new_setting.clear_filepath_ ? false
-                                   : (((current_setting != nullptr) &&
-                                       current_setting->filepath_specified_) ||
-                                      (new_setting.filepath_ != nullptr)));
+      (((current_setting != nullptr) && current_setting->filepath_specified_));
 
   if (level_specified) {
     level = (new_setting.level_ != nullptr) ? *new_setting.level_
@@ -190,9 +180,7 @@ TraceManager::UpdateTraceSettingInternal(
                         : current_setting->log_frequency_;
   }
   if (filepath_specified) {
-    filepath = (new_setting.filepath_ != nullptr)
-                   ? *new_setting.filepath_
-                   : current_setting->file_->FileName();
+    filepath = current_setting->file_->FileName();
   }
 
   // Some special case when updating model setting
@@ -272,7 +260,8 @@ void
 TraceManager::GetTraceSetting(
     const std::string& model_name, TRITONSERVER_InferenceTraceLevel* level,
     uint32_t* rate, int32_t* count, uint32_t* log_frequency,
-    std::string* filepath)
+    std::string* filepath, InferenceTraceMode* trace_mode,
+    TraceConfigMap* config_map)
 {
   std::shared_ptr<TraceSetting> trace_setting;
   {
@@ -287,21 +276,85 @@ TraceManager::GetTraceSetting(
   *count = trace_setting->count_;
   *log_frequency = trace_setting->log_frequency_;
   *filepath = trace_setting->file_->FileName();
+  *trace_mode = trace_setting->mode_;
+  *config_map = trace_setting->config_map_;
 }
 
-std::shared_ptr<TraceManager::Trace>
-TraceManager::SampleTrace(const std::string& model_name)
+void
+TraceManager::GetTraceSetting(
+    const std::string& model_name, std::shared_ptr<TraceSetting>& trace_setting)
 {
-  std::shared_ptr<TraceSetting> trace_setting;
-  {
-    std::lock_guard<std::mutex> r_lk(r_mu_);
-    auto m_it = model_settings_.find(model_name);
-    trace_setting =
-        (m_it == model_settings_.end()) ? global_setting_ : m_it->second;
+  std::lock_guard<std::mutex> r_lk(r_mu_);
+  auto m_it = model_settings_.find(model_name);
+  trace_setting =
+      (m_it == model_settings_.end()) ? global_setting_ : m_it->second;
+}
+
+TraceManager::TraceStartOptions
+TraceManager::GetTraceStartOptions(
+    AbstractCarrier& carrier, const std::string& model_name)
+{
+  TraceManager::TraceStartOptions start_options;
+  GetTraceSetting(model_name, start_options.trace_setting);
+  if (!start_options.trace_setting->level_ ==
+          TRITONSERVER_TRACE_LEVEL_DISABLED &&
+      start_options.trace_setting->mode_ == TRACE_MODE_OPENTELEMETRY) {
+#ifndef _WIN32
+    auto prop =
+        otel_cntxt::propagation::GlobalTextMapPropagator::GetGlobalPropagator();
+    auto ctxt = otel_cntxt::Context();
+    ctxt = prop->Extract(carrier, ctxt);
+    otel_trace_api::SpanContext span_context =
+        otel_trace_api::GetSpan(ctxt)->GetContext();
+    if (span_context.IsValid()) {
+      start_options.propagated_context = ctxt;
+      start_options.force_sample = true;
+    }
+#else
+    LOG_ERROR << "Unsupported trace mode: "
+              << TraceManager::InferenceTraceModeString(
+                     start_options.trace_setting->mode_);
+#endif  // _WIN32
   }
-  std::shared_ptr<Trace> ts = trace_setting->SampleTrace();
+  return start_options;
+}
+
+
+std::shared_ptr<TraceManager::Trace>
+TraceManager::SampleTrace(const TraceStartOptions& start_options)
+{
+  std::shared_ptr<Trace> ts =
+      start_options.trace_setting->SampleTrace(start_options.force_sample);
   if (ts != nullptr) {
-    ts->setting_ = trace_setting;
+    ts->setting_ = start_options.trace_setting;
+    if (ts->setting_->mode_ == TRACE_MODE_OPENTELEMETRY) {
+#ifndef _WIN32
+      auto steady_timestamp_ns =
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now().time_since_epoch())
+              .count();
+      if (ts->span_stacks_.find(ts->trace_id_) == ts->span_stacks_.end()) {
+        std::unique_ptr<
+            std::stack<opentelemetry::nostd::shared_ptr<otel_trace_api::Span>>>
+            st(new std::stack<
+                opentelemetry::nostd::shared_ptr<otel_trace_api::Span>>());
+        ts->span_stacks_.emplace(ts->trace_id_, std::move(st));
+      }
+      auto active_span =
+          otel_trace_api::GetSpan(start_options.propagated_context);
+      if (active_span->GetContext().IsValid()) {
+        ts->span_stacks_[ts->trace_id_]->emplace(active_span);
+      }
+      // Storing "InferRequest" span as a root span
+      // to keep it alive for the duration of the request.
+      ts->root_span_ =
+          ts->StartSpan("InferRequest", steady_timestamp_ns, ts->trace_id_);
+      ts->span_stacks_[ts->trace_id_]->emplace(ts->root_span_);
+#else
+      LOG_ERROR << "Unsupported trace mode: "
+                << TraceManager::InferenceTraceModeString(ts->setting_->mode_);
+#endif
+    }
   }
   return ts;
 }
@@ -313,7 +366,7 @@ TraceManager::Trace::~Trace()
     setting_->WriteTrace(streams_);
   } else if (setting_->mode_ == TRACE_MODE_OPENTELEMETRY) {
 #ifndef _WIN32
-    EndSpan(kRootSpan);
+    EndSpan(trace_id_);
 #else
     LOG_ERROR << "Unsupported trace mode: "
               << TraceManager::InferenceTraceModeString(setting_->mode_);
@@ -345,7 +398,8 @@ TraceManager::Trace::CaptureTimestamp(
           << "{\"name\":\"" << name << "\",\"ns\":" << timestamp_ns << "}]}";
     } else if (setting_->mode_ == TRACE_MODE_OPENTELEMETRY) {
 #ifndef _WIN32
-      AddEvent(kRootSpan, name, timestamp_ns);
+      root_span_->AddEvent(
+          name, time_offset_ + std::chrono::nanoseconds{timestamp_ns});
 #else
       LOG_ERROR << "Unsupported trace mode: "
                 << TraceManager::InferenceTraceModeString(setting_->mode_);
@@ -354,47 +408,58 @@ TraceManager::Trace::CaptureTimestamp(
   }
 }
 
+std::string
+TraceManager::Trace::RetrieveActivityName(
+    TRITONSERVER_InferenceTrace* trace,
+    TRITONSERVER_InferenceTraceActivity activity, uint64_t timestamp_ns)
+{
+  std::string activity_name =
+      TRITONSERVER_InferenceTraceActivityString(activity);
+
+  if (activity == TRITONSERVER_TRACE_CUSTOM_ACTIVITY) {
+    const char* val = nullptr;
+    LOG_TRITONSERVER_ERROR(
+        TRITONSERVER_InferenceTraceContext(trace, &val),
+        "Failed to retrieve trace context");
+    std::string context_str = (val != nullptr) ? std::string(val) : "";
+    triton::common::TritonJson::Value context;
+    LOG_TRITONSERVER_ERROR(
+        context.Parse(context_str), "Failed to parse trace context");
+    std::string look_for_key = std::to_string(timestamp_ns);
+    if (context.Find(look_for_key.c_str())) {
+      context.MemberAsString(look_for_key.c_str(), &activity_name);
+    }
+  }
+
+  return activity_name;
+}
+
 void
 TraceManager::InitTracer(const triton::server::TraceConfigMap& config_map)
 {
   switch (global_setting_->mode_) {
     case TRACE_MODE_OPENTELEMETRY: {
-#if !defined(_WIN32) && defined(TRITON_ENABLE_TRACING)
-      otlp::OtlpHttpExporterOptions opts;
+#ifndef _WIN32
+      otlp::OtlpHttpExporterOptions exporter_options;
       otel_resource::ResourceAttributes attributes = {};
-      attributes[otel_resource::SemanticConventions::kServiceName] =
-          "triton-inference-server";
-      auto mode_key = std::to_string(TRACE_MODE_OPENTELEMETRY);
-      auto otel_options_it = config_map.find(mode_key);
-      if (otel_options_it != config_map.end()) {
-        for (const auto& setting : otel_options_it->second) {
-          // FIXME add more configuration options of OTLP HTTP Exporter
-          if (setting.first == "url") {
-            opts.url = setting.second;
-          }
-          if (setting.first == "resource") {
-            auto pos = setting.second.find('=');
-            auto key = setting.second.substr(0, pos);
-            auto value = setting.second.substr(pos + 1);
-            attributes[key] = value;
-          }
-        }
-      }
-      auto exporter = otlp::OtlpHttpExporterFactory::Create(opts);
-      auto test_exporter = triton::server::GetEnvironmentVariableOrDefault(
-          "TRITON_OPENTELEMETRY_TEST", "false");
-      if (test_exporter != "false") {
-        exporter = opentelemetry::exporter::trace::OStreamSpanExporterFactory::
-            Create();
-      }
-      auto processor = otel_trace_sdk::SimpleSpanProcessorFactory::Create(
-          std::move(exporter));
+      otel_trace_sdk::BatchSpanProcessorOptions processor_options;
+
+      ProcessOpenTelemetryParameters(
+          config_map, exporter_options, attributes, processor_options);
+
+      auto exporter = otlp::OtlpHttpExporterFactory::Create(exporter_options);
+      auto processor = otel_trace_sdk::BatchSpanProcessorFactory::Create(
+          std::move(exporter), processor_options);
       auto resource = otel_resource::Resource::Create(attributes);
       std::shared_ptr<otel_trace_api::TracerProvider> provider =
           otel_trace_sdk::TracerProviderFactory::Create(
               std::move(processor), resource);
 
       otel_trace_api::Provider::SetTracerProvider(provider);
+      otel_cntxt::propagation::GlobalTextMapPropagator::SetGlobalPropagator(
+          opentelemetry::nostd::shared_ptr<
+              otel_cntxt::propagation::TextMapPropagator>(
+              new otel_trace_api::propagation::HttpTraceContext()));
       break;
 #else
       LOG_ERROR << "Unsupported trace mode: "
@@ -413,7 +478,7 @@ TraceManager::CleanupTracer()
 {
   switch (global_setting_->mode_) {
     case TRACE_MODE_OPENTELEMETRY: {
-#if !defined(_WIN32) && defined(TRITON_ENABLE_TRACING)
+#ifndef _WIN32
       std::shared_ptr<otel_trace_api::TracerProvider> none;
       otel_trace_api::Provider::SetTracerProvider(none);
       break;
@@ -431,16 +496,55 @@ TraceManager::CleanupTracer()
 
 #ifndef _WIN32
 void
+TraceManager::ProcessOpenTelemetryParameters(
+    const triton::server::TraceConfigMap& config_map,
+    otlp::OtlpHttpExporterOptions& exporter_options,
+    otel_resource::ResourceAttributes& attributes,
+    otel_trace_sdk::BatchSpanProcessorOptions& processor_options)
+{
+  attributes[otel_resource::SemanticConventions::kServiceName] =
+      std::string("triton-inference-server");
+  auto mode_key = std::to_string(TRACE_MODE_OPENTELEMETRY);
+  auto otel_options_it = config_map.find(mode_key);
+  if (otel_options_it == config_map.end()) {
+    return;
+  }
+  for (const auto& [setting, value] : otel_options_it->second) {
+    // FIXME add more configuration options of OTLP HTTP Exporter
+    if (setting == "url") {
+      exporter_options.url = std::get<std::string>(value);
+    }
+    if (setting == "resource") {
+      auto user_setting = std::get<std::string>(value);
+      auto pos = user_setting.find('=');
+      auto key = user_setting.substr(0, pos);
+      auto value = user_setting.substr(pos + 1);
+      attributes[key] = value;
+    }
+    if (setting == "bsp_max_queue_size") {
+      processor_options.max_queue_size = std::get<uint32_t>(value);
+    }
+    if (setting == "bsp_schedule_delay") {
+      processor_options.schedule_delay_millis =
+          std::chrono::milliseconds(std::get<uint32_t>(value));
+    }
+    if (setting == "bsp_max_export_batch_size") {
+      processor_options.max_export_batch_size = std::get<uint32_t>(value);
+    }
+  }
+}
+
+void
 TraceManager::Trace::StartSpan(
-    std::string span_key, TRITONSERVER_InferenceTrace* trace,
+    TRITONSERVER_InferenceTrace* trace,
     TRITONSERVER_InferenceTraceActivity activity, uint64_t timestamp_ns,
-    uint64_t trace_id)
+    uint64_t trace_id, std::string display_name)
 {
   uint64_t parent_id;
   LOG_TRITONSERVER_ERROR(
       TRITONSERVER_InferenceTraceParentId(trace, &parent_id),
       "getting trace parent id");
-  std::string parent_span_key = "";
+  auto span_parent_id = parent_id;
 
   // Currently, only 2 types of sub-spans are supported:
   // request span and compute span. Compute span is a leaf span
@@ -452,47 +556,40 @@ TraceManager::Trace::StartSpan(
   // If parent_id > 0, then this is a child trace, spawned from
   // the ensamble's main request. For this instance, the parent
   // span is the ensembles's request span.
-  if (parent_id == 0 && activity == TRITONSERVER_TRACE_REQUEST_START) {
-    parent_span_key = kRootSpan;
-  } else if (activity == TRITONSERVER_TRACE_REQUEST_START) {
-    // [FIXME] For BLS requests parent span for children's request spans
-    // should be parent model's compute span. Currently,
-    // this won't work, since parent's compute span will be created
-    // only after children's spans are created.
-    parent_span_key = kRequestSpan + std::to_string(parent_id);
-  } else if (activity == TRITONSERVER_TRACE_COMPUTE_START) {
-    parent_span_key = kRequestSpan + std::to_string(trace_id);
+  if ((parent_id == 0 && activity == TRITONSERVER_TRACE_REQUEST_START) ||
+      (activity == TRITONSERVER_TRACE_COMPUTE_START) ||
+      (activity == TRITONSERVER_TRACE_CUSTOM_ACTIVITY)) {
+    span_parent_id = trace_id;
   }
-
-  std::string display_name = "compute";
-  const char* model_name;
-  if (activity == TRITONSERVER_TRACE_REQUEST_START) {
-    LOG_TRITONSERVER_ERROR(
-        TRITONSERVER_InferenceTraceModelName(trace, &model_name),
-        "getting model name");
-    display_name = model_name;
-  }
-
-  auto span = StartSpan(display_name, timestamp_ns, parent_span_key);
+  auto span = StartSpan(display_name, timestamp_ns, span_parent_id);
 
   if (activity == TRITONSERVER_TRACE_REQUEST_START) {
     int64_t model_version;
+    const char* request_id;
     LOG_TRITONSERVER_ERROR(
         TRITONSERVER_InferenceTraceModelVersion(trace, &model_version),
         "getting model version");
-    span->SetAttribute("triton.model_name", model_name);
+    LOG_TRITONSERVER_ERROR(
+        TRITONSERVER_InferenceTraceRequestId(trace, &request_id),
+        "getting request id");
+    span->SetAttribute("triton.model_name", display_name);
     span->SetAttribute("triton.model_version", model_version);
     span->SetAttribute("triton.trace_id", trace_id);
     span->SetAttribute("triton.trace_parent_id", parent_id);
+    if (std::string(request_id) != "") {
+      span->SetAttribute("triton.request_id", request_id);
+    }
+    triton::common::TritonJson::WriteBuffer buffer;
+    PrepareTraceContext(span, &buffer);
+    TRITONSERVER_InferenceTraceSetContext(trace, buffer.Contents().c_str());
   }
-
-  otel_context_ = otel_context_.SetValue(span_key, span);
+  span_stacks_[trace_id]->emplace(span);
 }
 
 opentelemetry::nostd::shared_ptr<otel_trace_api::Span>
 TraceManager::Trace::StartSpan(
     std::string display_name, const uint64_t& raw_timestamp_ns,
-    std::string parent_span_key)
+    uint64_t trace_id)
 {
   otel_trace_api::StartSpanOptions options;
   options.kind = otel_trace_api::SpanKind::kServer;
@@ -501,45 +598,37 @@ TraceManager::Trace::StartSpan(
   options.start_steady_time =
       otel_common::SteadyTimestamp{std::chrono::nanoseconds{raw_timestamp_ns}};
 
-  // If the new span is a child span, we need to retrieve its parent from
-  // the context and provide it through StartSpanOptions to the child span
-  if (!parent_span_key.empty() && otel_context_.HasKey(parent_span_key)) {
-    auto parent_span = opentelemetry::nostd::get<
-        opentelemetry::nostd::shared_ptr<otel_trace_api::Span>>(
-        otel_context_.GetValue(parent_span_key));
-    options.parent = parent_span->GetContext();
+  // If the new span is a child span, we need to retrieve its parent and
+  // provide it through StartSpanOptions to the child span
+  if (span_stacks_.find(trace_id) != span_stacks_.end() &&
+      !span_stacks_[trace_id]->empty()) {
+    options.parent = span_stacks_[trace_id]->top()->GetContext();
   }
   auto provider = opentelemetry::trace::Provider::GetTracerProvider();
   return provider->GetTracer(kTritonTracer)->StartSpan(display_name, options);
 }
 
 void
-TraceManager::Trace::EndSpan(std::string span_key)
+TraceManager::Trace::EndSpan(uint64_t trace_id)
 {
   auto timestamp_ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
                           std::chrono::steady_clock::now().time_since_epoch())
                           .count();
-  EndSpan(span_key, timestamp_ns);
+  EndSpan(timestamp_ns, trace_id);
 }
 
 
 void
 TraceManager::Trace::EndSpan(
-    std::string span_key, const uint64_t& raw_timestamp_ns)
+    const uint64_t& raw_timestamp_ns, uint64_t trace_id)
 {
-  if (otel_context_.HasKey(span_key)) {
-    auto span = opentelemetry::nostd::get<
-        opentelemetry::nostd::shared_ptr<otel_trace_api::Span>>(
-        otel_context_.GetValue(span_key));
-
-    if (span == nullptr) {
-      return;
-    }
-
+  if (span_stacks_.find(trace_id) != span_stacks_.end() &&
+      !span_stacks_[trace_id]->empty()) {
     otel_trace_api::EndSpanOptions end_options;
     end_options.end_steady_time = otel_common::SteadyTimestamp{
         std::chrono::nanoseconds{raw_timestamp_ns}};
-    span->End(end_options);
+    span_stacks_[trace_id]->top()->End(end_options);
+    span_stacks_[trace_id]->pop();
   }
 }
 
@@ -551,80 +640,96 @@ TraceManager::Trace::ReportToOpenTelemetry(
   uint64_t id;
   LOG_TRITONSERVER_ERROR(
       TRITONSERVER_InferenceTraceId(trace, &id), "getting trace id");
-
-  auto current_span_key = GetSpanKeyForActivity(activity, id);
-  if (current_span_key.empty()) {
-    return;
+  if (span_stacks_.find(id) == span_stacks_.end()) {
+    std::unique_ptr<
+        std::stack<opentelemetry::nostd::shared_ptr<otel_trace_api::Span>>>
+        st(new std::stack<
+            opentelemetry::nostd::shared_ptr<otel_trace_api::Span>>());
+    span_stacks_.emplace(id, std::move(st));
   }
 
-  AddEvent(current_span_key, trace, activity, timestamp_ns, id);
-}
-
-std::string
-TraceManager::Trace::GetSpanKeyForActivity(
-    TRITONSERVER_InferenceTraceActivity activity, uint64_t trace_id)
-{
-  std::string span_name;
-  switch (activity) {
-    case TRITONSERVER_TRACE_REQUEST_START:
-    case TRITONSERVER_TRACE_QUEUE_START:
-    case TRITONSERVER_TRACE_REQUEST_END: {
-      span_name = kRequestSpan + std::to_string(trace_id);
-      break;
-    }
-
-    case TRITONSERVER_TRACE_COMPUTE_START:
-    case TRITONSERVER_TRACE_COMPUTE_INPUT_END:
-    case TRITONSERVER_TRACE_COMPUTE_OUTPUT_START:
-    case TRITONSERVER_TRACE_COMPUTE_END: {
-      span_name = kComputeSpan + std::to_string(trace_id);
-      break;
-    }
-    case TRITONSERVER_TRACE_TENSOR_QUEUE_INPUT:
-    case TRITONSERVER_TRACE_TENSOR_BACKEND_INPUT:
-    case TRITONSERVER_TRACE_TENSOR_BACKEND_OUTPUT:
-    default: {
-      LOG_ERROR << "Unsupported activity: "
-                << TRITONSERVER_InferenceTraceActivityString(activity);
-      span_name = "";
-      break;
-    }
-  }
-
-  return span_name;
+  AddEvent(trace, activity, timestamp_ns, id);
 }
 
 void
 TraceManager::Trace::AddEvent(
-    std::string span_key, TRITONSERVER_InferenceTrace* trace,
+    TRITONSERVER_InferenceTrace* trace,
     TRITONSERVER_InferenceTraceActivity activity, uint64_t timestamp_ns,
-    uint64_t id)
+    uint64_t trace_id)
 {
+  std::string activity_name =
+      RetrieveActivityName(trace, activity, timestamp_ns);
+  static std::string start = "_START";
+  static std::string end = "_END";
   if (activity == TRITONSERVER_TRACE_REQUEST_START ||
-      activity == TRITONSERVER_TRACE_COMPUTE_START) {
-    StartSpan(span_key, trace, activity, timestamp_ns, id);
+      activity == TRITONSERVER_TRACE_COMPUTE_START ||
+      (activity == TRITONSERVER_TRACE_CUSTOM_ACTIVITY &&
+       activity_name.length() > start.length() &&
+       std::equal(start.rbegin(), start.rend(), activity_name.rbegin()))) {
+    std::string span_name = activity_name;
+
+    if (activity == TRITONSERVER_TRACE_CUSTOM_ACTIVITY) {
+      span_name =
+          activity_name.substr(0, activity_name.length() - start.length());
+    } else if (activity == TRITONSERVER_TRACE_REQUEST_START) {
+      const char* model_name;
+      LOG_TRITONSERVER_ERROR(
+          TRITONSERVER_InferenceTraceModelName(trace, &model_name),
+          "getting model name");
+      span_name = model_name;
+    } else if (activity == TRITONSERVER_TRACE_COMPUTE_START) {
+      span_name = "compute";
+    }
+
+    StartSpan(trace, activity, timestamp_ns, trace_id, span_name);
   }
 
-  AddEvent(
-      span_key, TRITONSERVER_InferenceTraceActivityString(activity),
-      timestamp_ns);
+  AddEvent(activity_name, timestamp_ns, trace_id);
 
   if (activity == TRITONSERVER_TRACE_REQUEST_END ||
-      activity == TRITONSERVER_TRACE_COMPUTE_END) {
-    EndSpan(span_key, timestamp_ns);
+      activity == TRITONSERVER_TRACE_COMPUTE_END ||
+      (activity == TRITONSERVER_TRACE_CUSTOM_ACTIVITY &&
+       activity_name.length() > end.length() &&
+       std::equal(end.rbegin(), end.rend(), activity_name.rbegin()))) {
+    EndSpan(timestamp_ns, trace_id);
   }
 }
 
 void
 TraceManager::Trace::AddEvent(
-    std::string span_key, std::string event, uint64_t timestamp)
+    const std::string& event, uint64_t timestamp, uint64_t trace_id)
 {
-  if (otel_context_.HasKey(span_key)) {
-    auto span = opentelemetry::nostd::get<
-        opentelemetry::nostd::shared_ptr<otel_trace_api::Span>>(
-        otel_context_.GetValue(span_key));
-    span->AddEvent(event, time_offset_ + std::chrono::nanoseconds{timestamp});
+  if (span_stacks_.find(trace_id) != span_stacks_.end() &&
+      !span_stacks_[trace_id]->empty()) {
+    span_stacks_[trace_id]->top()->AddEvent(
+        event, time_offset_ + std::chrono::nanoseconds{timestamp});
   }
+}
+
+void
+TraceManager::Trace::PrepareTraceContext(
+    opentelemetry::nostd::shared_ptr<otel_trace_api::Span> span,
+    triton::common::TritonJson::WriteBuffer* buffer)
+{
+  triton::common::TritonJson::Value json(
+      triton::common::TritonJson::ValueType::OBJECT);
+  char trace_id[32] = {0};
+  char span_id[16] = {0};
+  char trace_flags[2] = {0};
+  span->GetContext().span_id().ToLowerBase16(span_id);
+  span->GetContext().trace_id().ToLowerBase16(trace_id);
+  span->GetContext().trace_flags().ToLowerBase16(trace_flags);
+  std::string kTraceParent = std::string("traceparent");
+  std::string kTraceState = std::string("tracestate");
+  std::string traceparent = std::string("00-") + std::string(trace_id, 32) +
+                            std::string("-") + std::string(span_id, 16) +
+                            std::string("-") + std::string(trace_flags, 2);
+  std::string tracestate = span->GetContext().trace_state()->ToHeader();
+  json.SetStringObject(kTraceParent.c_str(), traceparent);
+  if (!tracestate.empty()) {
+    json.SetStringObject(kTraceState.c_str(), tracestate);
+  }
+  json.Write(buffer);
 }
 #endif
 
@@ -652,9 +757,9 @@ TraceManager::InferenceTraceModeString(InferenceTraceMode mode)
 {
   switch (mode) {
     case TRACE_MODE_TRITON:
-      return "TRITON";
+      return "triton";
     case TRACE_MODE_OPENTELEMETRY:
-      return "OPENTELEMETRY";
+      return "opentelemetry";
   }
 
   return "<unknown>";
@@ -738,7 +843,8 @@ TraceManager::TraceActivity(
   }
 
   *ss << "{\"id\":" << id << ",\"timestamps\":["
-      << "{\"name\":\"" << TRITONSERVER_InferenceTraceActivityString(activity)
+      << "{\"name\":\""
+      << ts->RetrieveActivityName(trace, activity, timestamp_ns)
       << "\",\"ns\":" << timestamp_ns << "}]}";
 }
 
@@ -1015,21 +1121,36 @@ TraceManager::TraceFile::SaveTraces(
 }
 
 std::shared_ptr<TraceManager::Trace>
-TraceManager::TraceSetting::SampleTrace()
+TraceManager::TraceSetting::SampleTrace(bool force_sample)
 {
-  bool create_trace = false;
+  bool count_rate_hit = false;
   {
     std::lock_guard<std::mutex> lk(mu_);
-    if (!Valid()) {
-      return nullptr;
-    }
-    create_trace = (((++sample_) % rate_) == 0);
-    if (create_trace && (count_ > 0)) {
-      --count_;
-      ++created_;
+    // [FIXME: DLIS-6033]
+    // A current WAR for initiating trace based on propagated context only
+    // Currently this is implemented through setting trace rate as 0
+    if (rate_ != 0) {
+      // If `count_` hits 0, `Valid()` returns false for this and all
+      // following requests (unless `count_` is updated by a user).
+      // At this point we only trace requests for which
+      // `force_sample` is true.
+      if (!Valid() && !force_sample) {
+        return nullptr;
+      }
+      // `sample_` counts all requests, coming to server.
+      count_rate_hit = (((++sample_) % rate_) == 0);
+      if (count_rate_hit && (count_ > 0)) {
+        --count_;
+        ++created_;
+      } else if (count_rate_hit && (count_ == 0)) {
+        // This condition is reached, when `force_sample` is true,
+        // `count_rate_hit` is true, but `count_` is 0. Due to the
+        // latter, we explicitly set `count_rate_hit` to false.
+        count_rate_hit = false;
+      }
     }
   }
-  if (create_trace) {
+  if (count_rate_hit || force_sample) {
     std::shared_ptr<TraceManager::Trace> lts(new Trace());
     // Split 'Trace' management to frontend and Triton trace separately
     // to avoid dependency between frontend request and Triton trace's
@@ -1049,22 +1170,6 @@ TraceManager::TraceSetting::SampleTrace()
     LOG_TRITONSERVER_ERROR(
         TRITONSERVER_InferenceTraceId(trace, &lts->trace_id_),
         "getting trace id");
-    if (mode_ == TRACE_MODE_OPENTELEMETRY) {
-#ifndef _WIN32
-      auto steady_timestamp_ns =
-          std::chrono::duration_cast<std::chrono::nanoseconds>(
-              std::chrono::steady_clock::now().time_since_epoch())
-              .count();
-      auto root_span = lts->StartSpan("InferRequest", steady_timestamp_ns);
-      // Initializing OTel context and storing "InferRequest" span as a root
-      // span to keep it alive for the duration of the request.
-      lts->otel_context_ =
-          opentelemetry::context::Context({kRootSpan, root_span});
-#else
-      LOG_ERROR << "Unsupported trace mode: "
-                << TraceManager::InferenceTraceModeString(mode_);
-#endif
-    }
     return lts;
   }
   return nullptr;

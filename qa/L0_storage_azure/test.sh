@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2020-2022, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2020-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -63,11 +63,10 @@ CONTAINER_NAME="tritonqatest${timestamp}"
 # container path (Point to the container when testing cloud storage)
 AS_URL="as://${ACCOUNT_NAME}/${CONTAINER_NAME}"
 
-# Must use setuptools version before 58.0.0 due to https://github.com/Azure/azure-cli/issues/19468
-python -m pip install -U setuptools==57.5.0
-
 # Can now install latest azure-cli (instead of 2.0.73)
-python -m pip install azure-cli
+# https://github.com/Azure/azure-cli/issues/30102
+# https://github.com/Azure/azure-cli/issues/30127
+python -m pip install azure-cli setuptools "azure-mgmt-rdbms==10.2.0b17"
 
 # create test container
 az storage container create --name ${CONTAINER_NAME} --account-name ${ACCOUNT_NAME} --account-key ${ACCOUNT_KEY}
@@ -105,11 +104,12 @@ function setup_model_repo() {
     rm -rf models && mkdir -p models
     for FW in $BACKENDS; do
         cp -r /data/inferenceserver/${REPO_VERSION}/qa_model_repository/${FW}_float32_float32_float32 models/
+        # Copy models with string inputs and remove nobatch (bs=1) models. Model does not exist for plan backend.
+        if [[ ${FW} != "plan" ]]; then
+            cp -r /data/inferenceserver/${REPO_VERSION}/qa_model_repository/${FW}*_object_object_object/ models/
+            rm -rf models/*nobatch*
+        fi
     done
-
-    # Copy models with string inputs and remove nobatch (bs=1) models
-    cp -r /data/inferenceserver/${REPO_VERSION}/qa_model_repository/*_object_object_object models/
-    rm -rf models/*nobatch*
 }
 
 setup_model_repo
@@ -168,6 +168,45 @@ for ENV_VAR in "shared_key"; do
     kill $SERVER_PID
     wait $SERVER_PID
 done
+
+# Test localization to a specified location
+export TRITON_AZURE_MOUNT_DIRECTORY=`pwd`/azure_localization_test
+
+if [ -d "$TRITON_AZURE_MOUNT_DIRECTORY" ]; then
+  rm -rf $TRITON_AZURE_MOUNT_DIRECTORY
+fi
+
+mkdir -p $TRITON_AZURE_MOUNT_DIRECTORY
+
+SERVER_LOG=$SERVER_LOG_BASE.custom_localization.log
+SERVER_ARGS="--model-repository=$MODEL_REPO --exit-timeout-secs=120"
+
+run_server
+if [ "$SERVER_PID" == "0" ]; then
+    echo -e "\n***\n*** Failed to start $SERVER\n***"
+    cat $SERVER_LOG
+    exit 1
+fi
+
+if [ -z "$(ls -A $TRITON_AZURE_MOUNT_DIRECTORY)" ]; then
+    echo -e "\n***\n*** Test localization to a specified location failed. \n***"
+    echo -e "\n***\n*** Specified mount folder $TRITON_AZURE_MOUNT_DIRECTORY is empty \n***"
+    ls -A $TRITON_AZURE_MOUNT_DIRECTORY
+    exit 1
+fi
+
+kill $SERVER_PID
+wait $SERVER_PID
+
+if [ -d "$TRITON_AZURE_MOUNT_DIRECTORY" ] && [ ! -z "$(ls -A $TRITON_AZURE_MOUNT_DIRECTORY)" ]; then
+    echo -e "\n***\n*** Test localization to a specified location failed. \n***"
+    echo -e "\n***\n*** Specified mount folder $TRITON_AZURE_MOUNT_DIRECTORY was not cleared properly. \n***"
+    ls -A $TRITON_AZURE_MOUNT_DIRECTORY
+    exit 1
+fi
+
+rm -rf $TRITON_AZURE_MOUNT_DIRECTORY
+unset TRITON_AZURE_MOUNT_DIRECTORY
 
 # Add test for explicit model control
 SERVER_LOG=$SERVER_LOG_BASE.explicit.log

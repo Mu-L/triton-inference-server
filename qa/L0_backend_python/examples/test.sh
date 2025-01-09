@@ -1,5 +1,5 @@
 #!/bin/bash
-# Copyright 2021-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2021-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -28,35 +28,55 @@
 source ../common.sh
 source ../../common/util.sh
 
-TRITON_DIR=${TRITON_DIR:="/opt/tritonserver"}
-SERVER=${TRITON_DIR}/bin/tritonserver
-BACKEND_DIR=${TRITON_DIR}/backends
-SERVER_ARGS="--model-repository=`pwd`/python_backend/models --backend-directory=${BACKEND_DIR} --log-verbose=1"
+TRITON_REPO_ORGANIZATION=${TRITON_REPO_ORGANIZATION:="http://github.com/triton-inference-server"}
+
+SERVER_ARGS="--model-repository=${MODELDIR}/examples/python_backend/models --backend-directory=${BACKEND_DIR} --log-verbose=1"
 SERVER_LOG="./examples_server.log"
 
 RET=0
 rm -fr *.log python_backend/
 
 # Install torch
-# Skip torch and torchvision install on Jetson since it is already installed.
-if [ "$TEST_JETSON" == "0" ]; then
-    pip3 uninstall -y torch
-    pip3 install torch==2.0.0+cu117 -f https://download.pytorch.org/whl/torch_stable.html torchvision==0.15.0+cu117
+pip3 uninstall -y torch
+pip3 uninstall -y numpy
+# NOTE: Using this subtest as a test case that involves using a python model with
+# numpy 2.X without changing the environments used in all the other test cases.
+if [ "$TEST_JETSON" == "0" ] && [[ ${TEST_WINDOWS} == 0 ]]; then
+    if [ ${PYTHON_ENV_VERSION} == "8" ]; then
+        # Python 3.8 does not support numpy 2.x, so installing numpy1.x
+        pip3 install "numpy<2"
+        pip3 install torch==2.0.0+cu117 -f https://download.pytorch.org/whl/torch_stable.html torchvision==0.15.0+cu117
+    else
+        # Python 3.9 >= supports numpy 2.x.
+        pip3 install "numpy>=2"
+        pip3 install torch==2.5.0 torchvision==0.20.0 --index-url https://download.pytorch.org/whl/cu124
+    fi
+else
+    if [ ${PYTHON_ENV_VERSION} == "8" ]; then
+        # Python 3.8 does not support numpy 2.x, so installing numpy1.x
+        pip3 install "numpy<2"
+        pip3 install torch==2.0.0 -f https://download.pytorch.org/whl/torch_stable.html torchvision==0.15.0
+    else
+        # Python 3.9 >= supports numpy 2.x.
+        pip3 install "numpy>=2"
+        pip3 install torch==2.5.0 -f https://download.pytorch.org/whl/torch_stable.html torchvision==0.20.0
+    fi
 fi
 
 # Install `validators` for Model Instance Kind example
 pip3 install validators
 
 # Install JAX
-if [ "$TEST_JETSON" == "0" ]; then
+# Jax has dropped the support for Python 3.8. See https://jax.readthedocs.io/en/latest/changelog.html
+if [ "$TEST_JETSON" == "0" ] && [ ${PYTHON_ENV_VERSION} != "8" ]; then
     pip3 install --upgrade "jax[cuda12_local]" -f https://storage.googleapis.com/jax-releases/jax_cuda_releases.html
 fi
 
-git clone https://github.com/triton-inference-server/python_backend -b $PYTHON_BACKEND_REPO_TAG
+git clone ${TRITON_REPO_ORGANIZATION}/python_backend -b $PYTHON_BACKEND_REPO_TAG
 cd python_backend
 
 # Example 1
-CLIENT_LOG="./examples_add_sub_client.log"
+CLIENT_LOG="../examples_add_sub_client.log"
 mkdir -p models/add_sub/1/
 cp examples/add_sub/model.py models/add_sub/1/model.py
 cp examples/add_sub/config.pbtxt models/add_sub/config.pbtxt
@@ -82,11 +102,10 @@ if [ $? -ne 0 ]; then
 fi
 set -e
 
-kill $SERVER_PID
-wait $SERVER_PID
+kill_server
 
 # Example 2
-CLIENT_LOG="./examples_pytorch_client.log"
+CLIENT_LOG="../examples_pytorch_client.log"
 mkdir -p models/pytorch/1/
 cp examples/pytorch/model.py models/pytorch/1/model.py
 cp examples/pytorch/config.pbtxt models/pytorch/config.pbtxt
@@ -112,15 +131,15 @@ if [ $? -ne 0 ]; then
 fi
 set -e
 
-kill $SERVER_PID
-wait $SERVER_PID
+kill_server
 
 # Example 3
 
 # JAX AddSub
 # JAX is not supported on Jetson
-if [ "$TEST_JETSON" == "0" ]; then
-    CLIENT_LOG="./examples_jax_client.log"
+# Jax has dropped the support for Python 3.8. See https://jax.readthedocs.io/en/latest/changelog.html
+if [ "$TEST_JETSON" == "0" ] && [ ${PYTHON_ENV_VERSION} != "8" ]; then
+    CLIENT_LOG="../examples_jax_client.log"
     mkdir -p models/jax/1/
     cp examples/jax/model.py models/jax/1/model.py
     cp examples/jax/config.pbtxt models/jax/config.pbtxt
@@ -146,14 +165,13 @@ if [ "$TEST_JETSON" == "0" ]; then
     fi
     set -e
 
-    kill $SERVER_PID
-    wait $SERVER_PID
+    kill_server
 fi
 
 # Example 4
 
 # BLS Sync
-CLIENT_LOG="./examples_sync_client.log"
+CLIENT_LOG="../examples_sync_client.log"
 mkdir -p models/bls_sync/1
 cp examples/bls/sync_model.py models/bls_sync/1/model.py
 cp examples/bls/sync_config.pbtxt models/bls_sync/config.pbtxt
@@ -179,13 +197,12 @@ if [ $? -ne 0 ]; then
 fi
 set -e
 
-kill $SERVER_PID
-wait $SERVER_PID
+kill_server
 
 # Example 5
 
 # Decoupled Repeat
-CLIENT_LOG="./examples_repeat_client.log"
+CLIENT_LOG="../examples_repeat_client.log"
 mkdir -p models/repeat_int32/1/
 cp examples/decoupled/repeat_model.py models/repeat_int32/1/model.py
 cp examples/decoupled/repeat_config.pbtxt models/repeat_int32/config.pbtxt
@@ -211,13 +228,12 @@ if [ $? -ne 0 ]; then
 fi
 set -e
 
-kill $SERVER_PID
-wait $SERVER_PID
+kill_server
 
 # Example 6
 
 # Decoupled Square
-CLIENT_LOG="./examples_square_client.log"
+CLIENT_LOG="../examples_square_client.log"
 mkdir -p models/square_int32/1/
 cp examples/decoupled/square_model.py models/square_int32/1/model.py
 cp examples/decoupled/square_config.pbtxt models/square_int32/config.pbtxt
@@ -243,8 +259,7 @@ if [ $? -ne 0 ]; then
 fi
 set -e
 
-kill $SERVER_PID
-wait $SERVER_PID
+kill_server
 
 #
 # BLS Async
@@ -253,7 +268,7 @@ wait $SERVER_PID
 # Having multiple python versions lead to build issues.
 # Anaconda is not officially supported on Jetson.
 if [ "$TEST_JETSON" == "0" ]; then
-    CLIENT_LOG="./examples_async_client.log"
+    CLIENT_LOG="../examples_async_client.log"
     mkdir -p models/bls_async/1
     cp examples/bls/async_model.py models/bls_async/1/model.py
     cp examples/bls/async_config.pbtxt models/bls_async/config.pbtxt
@@ -280,12 +295,11 @@ if [ "$TEST_JETSON" == "0" ]; then
 
     set -e
 
-    kill $SERVER_PID
-    wait $SERVER_PID
+    kill_server
 fi
 
 # Auto Complete Model Configuration Example
-CLIENT_LOG="./examples_auto_complete_client.log"
+CLIENT_LOG="../examples_auto_complete_client.log"
 mkdir -p models/nobatch_auto_complete/1/
 mkdir -p models/batch_auto_complete/1/
 cp examples/auto_complete/nobatch_model.py models/nobatch_auto_complete/1/model.py
@@ -315,11 +329,10 @@ if [ $? -ne 0 ]; then
 fi
 set -e
 
-kill $SERVER_PID
-wait $SERVER_PID
+kill_server
 
 # BLS Decoupled Sync
-CLIENT_LOG="./examples_bls_decoupled_sync_client.log"
+CLIENT_LOG="../examples_bls_decoupled_sync_client.log"
 mkdir -p models/bls_decoupled_sync/1
 cp examples/bls_decoupled/sync_model.py models/bls_decoupled_sync/1/model.py
 cp examples/bls_decoupled/sync_config.pbtxt models/bls_decoupled_sync/config.pbtxt
@@ -345,12 +358,11 @@ if [ $? -ne 0 ]; then
 fi
 set -e
 
-kill $SERVER_PID
-wait $SERVER_PID
+kill_server
 
 # BLS Decoupled Async
 if [ "$TEST_JETSON" == "0" ]; then
-    CLIENT_LOG="./examples_bls_decoupled_async_client.log"
+    CLIENT_LOG="../examples_bls_decoupled_async_client.log"
     mkdir -p models/bls_decoupled_async/1
     cp examples/bls_decoupled/async_model.py models/bls_decoupled_async/1/model.py
     cp examples/bls_decoupled/async_config.pbtxt models/bls_decoupled_async/config.pbtxt
@@ -377,14 +389,13 @@ if [ "$TEST_JETSON" == "0" ]; then
 
     set -e
 
-    kill $SERVER_PID
-    wait $SERVER_PID
+    kill_server
 fi
 
 # Example 7
 
 # Model Instance Kind
-CLIENT_LOG="./examples_model_instance_kind.log"
+CLIENT_LOG="../examples_model_instance_kind.log"
 mkdir -p models/resnet50/1
 cp examples/instance_kind/model.py models/resnet50/1/
 cp examples/instance_kind/config.pbtxt models/resnet50/
@@ -410,11 +421,10 @@ if [ $? -ne 0 ]; then
 fi
 set -e
 
-kill $SERVER_PID
-wait $SERVER_PID
+kill_server
 
 # Custom Metrics
-CLIENT_LOG="./examples_custom_metrics_client.log"
+CLIENT_LOG="../examples_custom_metrics_client.log"
 mkdir -p models/custom_metrics/1
 cp examples/custom_metrics/model.py models/custom_metrics/1/model.py
 cp examples/custom_metrics/config.pbtxt models/custom_metrics/config.pbtxt
@@ -440,8 +450,7 @@ if [ $? -ne 0 ]; then
 fi
 set -e
 
-kill $SERVER_PID
-wait $SERVER_PID
+kill_server
 
 
 if [ $RET -eq 0 ]; then
@@ -449,7 +458,5 @@ if [ $RET -eq 0 ]; then
 else
     echo -e "\n***\n*** Example verification test FAILED.\n***"
 fi
-
-collect_artifacts_from_subdir
 
 exit $RET

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2023-2024, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -56,10 +56,12 @@ class InferenceParametersTest(IsolatedAsyncioTestCase):
         self.parameter_list = []
         self.parameter_list.append({"key1": "value1", "key2": "value2"})
         self.parameter_list.append({"key1": 1, "key2": 2})
+        self.parameter_list.append({"key1": 123.123, "key2": 321.321})
         self.parameter_list.append({"key1": True, "key2": "value2"})
         self.parameter_list.append({"triton_": True, "key2": "value2"})
 
-        if TEST_HEADER == "1":
+        # Only "test_params" tests parameters without headers.
+        if TEST_HEADER != "test_params":
             self.headers = {
                 "header_1": "value_1",
                 "header_2": "value_2",
@@ -69,11 +71,14 @@ class InferenceParametersTest(IsolatedAsyncioTestCase):
             }
 
             # only these headers should be forwarded to the model.
-            self.expected_headers = {
-                "my_header_1": "my_value_1",
-                "my_header_2": "my_value_2",
-                "my_header_3": 'This is a "quoted" string with a backslash\ ',
-            }
+            if TEST_HEADER == "test_grpc_header_forward_pattern_case_sensitive":
+                self.expected_headers = {}
+            else:
+                self.expected_headers = {
+                    "my_header_1": "my_value_1",
+                    "my_header_2": "my_value_2",
+                    "my_header_3": 'This is a "quoted" string with a backslash\ ',
+                }
         else:
             self.headers = {}
             self.expected_headers = {}
@@ -94,9 +99,20 @@ class InferenceParametersTest(IsolatedAsyncioTestCase):
         inputs[0].set_data_from_numpy(np.asarray([1], dtype=np.float32))
         return inputs
 
-    async def send_request_and_verify(self, client_type, client, is_async=False):
+    async def send_request_and_verify(
+        self, client_type, client, is_async=False, model_name="parameter"
+    ):
         inputs = self.create_inputs(client_type)
         for parameters in self.parameter_list:
+            # Setup infer callable to re-use below for brevity
+            infer_callable = partial(
+                client.infer,
+                model_name=model_name,
+                inputs=inputs,
+                parameters=parameters,
+                headers=self.headers,
+            )
+
             # The `triton_` prefix is reserved for Triton usage
             should_error = False
             if "triton_" in parameters.keys():
@@ -105,38 +121,17 @@ class InferenceParametersTest(IsolatedAsyncioTestCase):
             if is_async:
                 if should_error:
                     with self.assertRaises(InferenceServerException):
-                        result = await client.infer(
-                            model_name="parameter",
-                            inputs=inputs,
-                            parameters=parameters,
-                            headers=self.headers,
-                        )
+                        await infer_callable()
                     return
                 else:
-                    result = await client.infer(
-                        model_name="parameter",
-                        inputs=inputs,
-                        parameters=parameters,
-                        headers=self.headers,
-                    )
-
+                    result = await infer_callable()
             else:
                 if should_error:
                     with self.assertRaises(InferenceServerException):
-                        result = client.infer(
-                            model_name="parameter",
-                            inputs=inputs,
-                            parameters=parameters,
-                            headers=self.headers,
-                        )
+                        infer_callable()
                     return
                 else:
-                    result = client.infer(
-                        model_name="parameter",
-                        inputs=inputs,
-                        parameters=parameters,
-                        headers=self.headers,
-                    )
+                    result = infer_callable()
 
             self.verify_outputs(result, parameters)
 
@@ -218,6 +213,9 @@ class InferenceParametersTest(IsolatedAsyncioTestCase):
             self.assertFalse(result is InferenceServerException)
             self.verify_outputs(result, parameters)
         self.grpc.stop_stream()
+
+    async def test_ensemble_parameter_forwarding(self):
+        await self.send_request_and_verify(httpclient, self.http, model_name="ensemble")
 
     async def asyncTearDown(self):
         self.http.close()

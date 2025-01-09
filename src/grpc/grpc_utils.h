@@ -38,6 +38,87 @@
 
 namespace triton { namespace server { namespace grpc {
 
+// The step of processing that the state is in. Every state must
+// recognize START, COMPLETE and FINISH and the others are optional.
+typedef enum {
+  // This marks the starting stage of the RPC
+  START,
+  // This marks that RPC is complete.
+  COMPLETE,
+  // This marks the stage where all the notifications from the gRPC
+  // completion queue is received and state can be safely released.
+  FINISH,
+  // This stage means that RPC has been issued to Triton for inference
+  // and is waiting for the server callbacks or cancellation to be
+  // invoked.
+  ISSUED,
+  // This stage means the request has been read from the network and
+  // can be sent to Triton for execution.
+  READ,
+  // This stage means that the response is ready to be written back to
+  // the network.
+  WRITEREADY,
+  // This stage means that response has been written completely to the
+  // network.
+  WRITTEN,
+  // This marks the special stage for the state object to differentiate
+  // the tag delivered from AsyncNotifyWhenDone() method.
+  WAITING_NOTIFICATION,
+  // This stage means that the cancellation for the RPC has been issued
+  // to the server.
+  CANCELLATION_ISSUED,
+  // This stage marks that the state has been successfully cancelled.
+  CANCELLED,
+  // This is intermediary stage where the state has been been partially
+  // completed by grpc responder Finish call or AsyncNotifyWhenDone()
+  // notification. The other next call will move the stage to fully
+  // complete.
+  PARTIAL_COMPLETION
+} Steps;
+
+typedef enum {
+  // No error from CORE seen yet
+  NONE,
+  // Error from CORE encountered, waiting to be picked up by completion queue to
+  // initiate cancellation
+  ERROR_ENCOUNTERED,
+  // Error from CORE encountered, stream closed
+  // This state is added to avoid double cancellation
+  ERROR_HANDLING_COMPLETE
+} TritonGRPCErrorSteps;
+
+class gRPCErrorTracker {
+ public:
+  // True if set by user via header
+  // Can be accessed without a lock, as set only once in startstream
+  std::atomic<bool> triton_grpc_error_;
+
+  // Indicates the state of triton_grpc_error, only relevant if special
+  // triton_grpc_error feature set to true by client
+  TritonGRPCErrorSteps grpc_stream_error_state_;
+
+  // Constructor
+  gRPCErrorTracker()
+      : triton_grpc_error_(false),
+        grpc_stream_error_state_(TritonGRPCErrorSteps::NONE)
+  {
+  }
+  // Changes the state of grpc_stream_error_state_ to ERROR_HANDLING_COMPLETE,
+  // indicating we have closed the stream and initiated the cancel flow
+  void MarkGRPCErrorHandlingComplete();
+
+  // Returns true ONLY when GRPC_ERROR from CORE is waiting to be processed.
+  bool CheckAndUpdateGRPCError();
+
+  // Marks error after it has been responded to
+  void MarkGRPCErrorEncountered();
+
+  // Checks if error already responded to in triton_grpc_error mode
+  bool GRPCErrorEncountered();
+};
+// Debugging helper
+std::ostream& operator<<(std::ostream& out, const Steps& step);
+
 //
 // GrpcStatusUtil
 //
@@ -142,5 +223,4 @@ TRITONSERVER_Error* ParseClassificationParams(
 
 
 void ReadFile(const std::string& filename, std::string& data);
-
 }}}  // namespace triton::server::grpc

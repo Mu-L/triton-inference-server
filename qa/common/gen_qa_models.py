@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-# Copyright 2018-2023, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright 2018-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # Redistribution and use in source and binary forms, with or without
 # modification, are permitted provided that the following conditions
@@ -32,129 +32,19 @@ from builtins import range
 
 import gen_ensemble_model_utils as emu
 import numpy as np
+from gen_common import (
+    np_dtype_bfloat16,
+    np_to_model_dtype,
+    np_to_onnx_dtype,
+    np_to_tf_dtype,
+    np_to_torch_dtype,
+    np_to_trt_dtype,
+    openvino_save_model,
+)
 
 FLAGS = None
 np_dtype_string = np.dtype(object)
 from typing import List, Tuple
-
-
-def np_to_model_dtype(np_dtype):
-    if np_dtype == bool:
-        return "TYPE_BOOL"
-    elif np_dtype == np.int8:
-        return "TYPE_INT8"
-    elif np_dtype == np.int16:
-        return "TYPE_INT16"
-    elif np_dtype == np.int32:
-        return "TYPE_INT32"
-    elif np_dtype == np.int64:
-        return "TYPE_INT64"
-    elif np_dtype == np.uint8:
-        return "TYPE_UINT8"
-    elif np_dtype == np.uint16:
-        return "TYPE_UINT16"
-    elif np_dtype == np.float16:
-        return "TYPE_FP16"
-    elif np_dtype == np.float32:
-        return "TYPE_FP32"
-    elif np_dtype == np.float64:
-        return "TYPE_FP64"
-    elif np_dtype == np_dtype_string:
-        return "TYPE_STRING"
-    return None
-
-
-def np_to_tf_dtype(np_dtype):
-    if np_dtype == bool:
-        return tf.bool
-    elif np_dtype == np.int8:
-        return tf.int8
-    elif np_dtype == np.int16:
-        return tf.int16
-    elif np_dtype == np.int32:
-        return tf.int32
-    elif np_dtype == np.int64:
-        return tf.int64
-    elif np_dtype == np.uint8:
-        return tf.uint8
-    elif np_dtype == np.uint16:
-        return tf.uint16
-    elif np_dtype == np.float16:
-        return tf.float16
-    elif np_dtype == np.float32:
-        return tf.float32
-    elif np_dtype == np.float64:
-        return tf.float64
-    elif np_dtype == np_dtype_string:
-        return tf.string
-    return None
-
-
-def np_to_trt_dtype(np_dtype):
-    if np_dtype == bool:
-        return trt.bool
-    elif np_dtype == np.int8:
-        return trt.int8
-    elif np_dtype == np.int32:
-        return trt.int32
-    elif np_dtype == np.uint8:
-        return trt.uint8
-    elif np_dtype == np.float16:
-        return trt.float16
-    elif np_dtype == np.float32:
-        return trt.float32
-    return None
-
-
-def np_to_onnx_dtype(np_dtype):
-    if np_dtype == bool:
-        return onnx.TensorProto.BOOL
-    elif np_dtype == np.int8:
-        return onnx.TensorProto.INT8
-    elif np_dtype == np.int16:
-        return onnx.TensorProto.INT16
-    elif np_dtype == np.int32:
-        return onnx.TensorProto.INT32
-    elif np_dtype == np.int64:
-        return onnx.TensorProto.INT64
-    elif np_dtype == np.uint8:
-        return onnx.TensorProto.UINT8
-    elif np_dtype == np.uint16:
-        return onnx.TensorProto.UINT16
-    elif np_dtype == np.float16:
-        return onnx.TensorProto.FLOAT16
-    elif np_dtype == np.float32:
-        return onnx.TensorProto.FLOAT
-    elif np_dtype == np.float64:
-        return onnx.TensorProto.DOUBLE
-    elif np_dtype == np_dtype_string:
-        return onnx.TensorProto.STRING
-    return None
-
-
-def np_to_torch_dtype(np_dtype):
-    if np_dtype == bool:
-        return torch.bool
-    elif np_dtype == np.int8:
-        return torch.int8
-    elif np_dtype == np.int16:
-        return torch.int16
-    elif np_dtype == np.int32:
-        return torch.int
-    elif np_dtype == np.int64:
-        return torch.long
-    elif np_dtype == np.uint8:
-        return torch.uint8
-    elif np_dtype == np.uint16:
-        return None  # Not supported in Torch
-    elif np_dtype == np.float16:
-        return None
-    elif np_dtype == np.float32:
-        return torch.float
-    elif np_dtype == np.float64:
-        return torch.double
-    elif np_dtype == np_dtype_string:
-        return List[str]
 
 
 def create_graphdef_modelfile(
@@ -589,9 +479,7 @@ def create_plan_dynamic_rf_modelfile(
     # Create the model
     TRT_LOGGER = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(TRT_LOGGER)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    )
+    network = builder.create_network()
     if max_batch == 0:
         input_with_batchsize = [i for i in input_shape]
     else:
@@ -668,7 +556,10 @@ def create_plan_dynamic_rf_modelfile(
     profile = builder.create_optimization_profile()
     profile.set_shape("INPUT0", min_shape, opt_shape, max_shape)
     profile.set_shape("INPUT1", min_shape, opt_shape, max_shape)
-    flags = 1 << int(trt.BuilderFlag.STRICT_TYPES)
+
+    flags = 1 << int(trt.BuilderFlag.PREFER_PRECISION_CONSTRAINTS)
+    flags |= 1 << int(trt.BuilderFlag.REJECT_EMPTY_ALGORITHMS)
+
     datatype_set = set([trt_input_dtype, trt_output0_dtype, trt_output1_dtype])
     for dt in datatype_set:
         if dt == trt.int8:
@@ -728,9 +619,7 @@ def create_plan_dynamic_modelfile(
     # Create the model
     TRT_LOGGER = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(TRT_LOGGER)
-    network = builder.create_network(
-        1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
-    )
+    network = builder.create_network()
     if max_batch == 0:
         input_with_batchsize = [i for i in input_shape]
     else:
@@ -897,8 +786,13 @@ def create_plan_fixed_rf_modelfile(
     TRT_LOGGER = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(TRT_LOGGER)
     network = builder.create_network()
-    in0 = network.add_input("INPUT0", trt_input_dtype, input_shape)
-    in1 = network.add_input("INPUT1", trt_input_dtype, input_shape)
+    if max_batch == 0:
+        input_with_batchsize = [i for i in input_shape]
+    else:
+        input_with_batchsize = [-1] + [i for i in input_shape]
+
+    in0 = network.add_input("INPUT0", trt_input_dtype, input_with_batchsize)
+    in1 = network.add_input("INPUT1", trt_input_dtype, input_with_batchsize)
     add = network.add_elementwise(in0, in1, trt.ElementWiseOperation.SUM)
     sub = network.add_elementwise(in0, in1, trt.ElementWiseOperation.SUB)
 
@@ -926,17 +820,39 @@ def create_plan_fixed_rf_modelfile(
     if trt_output1_dtype == trt.int8:
         out1.get_output(0).dynamic_range = (-128.0, 127.0)
 
-    flags = 1 << int(trt.BuilderFlag.STRICT_TYPES)
+    config = builder.create_builder_config()
+
+    min_shape = []
+    opt_shape = []
+    max_shape = []
+    if max_batch != 0:
+        min_shape = min_shape + [1]
+        opt_shape = opt_shape + [max(1, max_batch)]
+        max_shape = max_shape + [max(1, max_batch)]
+    for i in input_shape:
+        min_shape = min_shape + [i]
+        opt_shape = opt_shape + [i]
+        max_shape = max_shape + [i]
+
+    profile = builder.create_optimization_profile()
+    profile.set_shape("INPUT0", min_shape, opt_shape, max_shape)
+    profile.set_shape("INPUT1", min_shape, opt_shape, max_shape)
+
+    flags = 1 << int(trt.BuilderFlag.PREFER_PRECISION_CONSTRAINTS)
+    flags |= 1 << int(trt.BuilderFlag.REJECT_EMPTY_ALGORITHMS)
+
     datatype_set = set([trt_input_dtype, trt_output0_dtype, trt_output1_dtype])
     for dt in datatype_set:
         if dt == trt.int8:
             flags |= 1 << int(trt.BuilderFlag.INT8)
         elif dt == trt.float16:
             flags |= 1 << int(trt.BuilderFlag.FP16)
+
     config = builder.create_builder_config()
     config.flags = flags
+    config.add_optimization_profile(profile)
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 20)
-    builder.max_batch_size = max(1, max_batch)
+
     try:
         engine_bytes = builder.build_serialized_network(network, config)
     except AttributeError:
@@ -981,8 +897,13 @@ def create_plan_fixed_modelfile(
     TRT_LOGGER = trt.Logger(trt.Logger.INFO)
     builder = trt.Builder(TRT_LOGGER)
     network = builder.create_network()
-    in0 = network.add_input("INPUT0", trt_input_dtype, input_shape)
-    in1 = network.add_input("INPUT1", trt_input_dtype, input_shape)
+    if max_batch == 0:
+        input_with_batchsize = [i for i in input_shape]
+    else:
+        input_with_batchsize = [-1] + [i for i in input_shape]
+
+    in0 = network.add_input("INPUT0", trt_input_dtype, input_with_batchsize)
+    in1 = network.add_input("INPUT1", trt_input_dtype, input_with_batchsize)
     add = network.add_elementwise(in0, in1, trt.ElementWiseOperation.SUM)
     sub = network.add_elementwise(in0, in1, trt.ElementWiseOperation.SUB)
 
@@ -995,8 +916,25 @@ def create_plan_fixed_modelfile(
     network.mark_output(out1.get_output(0))
 
     config = builder.create_builder_config()
+
+    min_shape = []
+    opt_shape = []
+    max_shape = []
+    if max_batch != 0:
+        min_shape = min_shape + [1]
+        opt_shape = opt_shape + [max(1, max_batch)]
+        max_shape = max_shape + [max(1, max_batch)]
+    for i in input_shape:
+        min_shape = min_shape + [i]
+        opt_shape = opt_shape + [i]
+        max_shape = max_shape + [i]
+
+    profile = builder.create_optimization_profile()
+    profile.set_shape("INPUT0", min_shape, opt_shape, max_shape)
+    profile.set_shape("INPUT1", min_shape, opt_shape, max_shape)
+    config.add_optimization_profile(profile)
+
     config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 1 << 20)
-    builder.max_batch_size = max(1, max_batch)
     try:
         engine_bytes = builder.build_serialized_network(network, config)
     except AttributeError:
@@ -1052,7 +990,6 @@ def create_plan_modelfile(
         or output1_dtype == np.uint8
     ):
         # TRT uint8 cannot be used to represent quantized floating-point value yet
-        # EXPLICIT_BATCH network and conversion are required to create models
         create_plan_dynamic_rf_modelfile(
             models_dir,
             max_batch,
@@ -1873,29 +1810,24 @@ def create_openvino_modelfile(
     )
     model_version_dir = models_dir + "/" + model_name + "/" + str(model_version)
 
-    in0 = ng.parameter(shape=batch_dim + input_shape, dtype=input_dtype, name="INPUT0")
-    in1 = ng.parameter(shape=batch_dim + input_shape, dtype=input_dtype, name="INPUT1")
-
-    r0 = ng.add(in0, in1) if not swap else ng.subtract(in0, in1)
-    r1 = ng.subtract(in0, in1) if not swap else ng.add(in0, in1)
-
-    result0 = ng.reshape(r0, batch_dim + output0_shape, special_zero=False)
-    result1 = ng.reshape(r1, batch_dim + output1_shape, special_zero=False)
-
-    op0 = ng.convert(result0, destination_type=output0_dtype, name="OUTPUT0")
-    op1 = ng.convert(result1, destination_type=output1_dtype, name="OUTPUT1")
-
-    function = ng.impl.Function([op0, op1], [in0, in1], model_name)
-    ie_network = IENetwork(ng.impl.Function.to_capsule(function))
-
-    try:
-        os.makedirs(model_version_dir)
-    except OSError as ex:
-        pass  # ignore existing dir
-
-    ie_network.serialize(
-        model_version_dir + "/model.xml", model_version_dir + "/model.bin"
+    in0 = ov.opset1.parameter(
+        shape=batch_dim + input_shape, dtype=input_dtype, name="INPUT0"
     )
+    in1 = ov.opset1.parameter(
+        shape=batch_dim + input_shape, dtype=input_dtype, name="INPUT1"
+    )
+
+    r0 = ov.opset1.add(in0, in1) if not swap else ov.opset1.subtract(in0, in1)
+    r1 = ov.opset1.subtract(in0, in1) if not swap else ov.opset1.add(in0, in1)
+
+    result0 = ov.opset1.reshape(r0, batch_dim + output0_shape, special_zero=False)
+    result1 = ov.opset1.reshape(r1, batch_dim + output1_shape, special_zero=False)
+
+    op0 = ov.opset1.convert(result0, destination_type=output0_dtype, name="OUTPUT0")
+    op1 = ov.opset1.convert(result1, destination_type=output1_dtype, name="OUTPUT1")
+
+    model = ov.Model([op0, op1], [in0, in1], model_name)
+    openvino_save_model(model_version_dir, model)
 
 
 def create_openvino_modelconfig(
@@ -2550,8 +2482,7 @@ if __name__ == "__main__":
         import torch
         from torch import nn
     if FLAGS.openvino:
-        from openvino.inference_engine import IENetwork
-        import ngraph as ng
+        import openvino.runtime as ov
 
     import test_util as tu
 
@@ -2643,6 +2574,18 @@ if __name__ == "__main__":
                 )
 
         if FLAGS.tensorrt:
+            if tu.check_gpus_compute_capability(min_capability=8.0):
+                create_fixed_models(
+                    FLAGS.models_dir,
+                    np_dtype_bfloat16,
+                    np_dtype_bfloat16,
+                    np_dtype_bfloat16,
+                )
+            else:
+                print(
+                    "Skipping the generation of TensorRT PLAN models for the BF16 datatype!"
+                )
+
             for vt in [np.float32, np.float16, np.int32, np.uint8]:
                 create_plan_modelfile(
                     FLAGS.models_dir, 8, 2, (16,), (16,), (16,), vt, vt, vt, swap=True
@@ -2918,6 +2861,23 @@ if __name__ == "__main__":
             (-1, 8, -1),
             32,
         )
+
+        if FLAGS.tensorrt:
+            if tu.check_gpus_compute_capability(min_capability=8.0):
+                create_models(
+                    FLAGS.models_dir,
+                    np_dtype_bfloat16,
+                    np_dtype_bfloat16,
+                    np_dtype_bfloat16,
+                    (-1, -1),
+                    (-1, -1),
+                    (-1, -1),
+                    0,
+                )
+            else:
+                print(
+                    "Skipping the generation of TensorRT PLAN models for the BF16 datatype!"
+                )
 
     if FLAGS.ensemble:
         # Create utility models used in ensemble
